@@ -6,7 +6,6 @@ import uuid
 import copy
 import html
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
@@ -999,5 +998,6 @@ def _inject_two_col_panel_styles(panel_title: str, col1=None, col2=None, table_l
         f'</style>'
     )
     st.markdown(css, unsafe_allow_html=True)
+
 
 
