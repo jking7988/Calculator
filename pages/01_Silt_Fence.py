@@ -1,0 +1,1002 @@
+# Double Oak – Fencing Estimator (Unified, Clean Rewrite)
+# ------------------------------------------------------
+
+import math
+import uuid
+import copy
+import html
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+from datetime import datetime
+
+from core.theme_persist import init_theme, render_toggle, sidebar_skin
+from core.theme import apply_theme, fix_select_colors
+from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
+from core import pricing as p
+from core import settings as cfg
+from core import pricebook
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+    HAS_AGGRID = True
+except ImportError:
+    HAS_AGGRID = False
+
+# -------------------- Page + Global CSS --------------------
+st.set_page_config(
+    page_title="Double Oak – Fencing Estimator",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    header[data-testid="stHeader"] { display: none !important; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+    .block-container { max-width: 100% !important; padding-top: .5rem; padding-left: 1rem; padding-right: 1rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Robust escape helper (works even if core.sanitize isn't available)
+try:
+    from core.sanitize import e  # type: ignore
+except Exception:  # noqa: BLE001
+    def e(x) -> str:
+        return html.escape(str(x))
+
+# -------------------- Session state init --------------------
+st.session_state.setdefault("export_history_fencing", [])
+st.session_state.setdefault("pricebook_warnings", [])
+st.session_state.setdefault("export_locked_lines", [])        # list[dict] with optional "_id"
+st.session_state.setdefault("last_fence_signature", None)      # str | None
+st.session_state.setdefault("preview_live_hidden_ids", [])     # list[str] of live row ids to hide
+st.session_state.setdefault("remove_sales_tax", False)
+
+# Ensure pricebook is loaded before we start reading prices
+pricebook.ensure_loaded()
+
+# -------------------- Constants / SKUs --------------------
+FABRIC_SKU_14G = "silt-fence-14g"
+FABRIC_SKU_125G = "silt-fence-12g5"
+
+POST_SKU_T_POST_4FT = "t-post-4ft"               # standard for 14g
+POST_SKU_TXDOT_T_POST_4FT = "tx-dot-t-post-4-ft" # REQUIRED for 12.5g (TX-DOT)
+POST_SKU_T_POST_6FT = "t-post-6ft"               # orange fence
+
+FABRIC_SKU_ORANGE_LIGHT = "orange-fence-light-duty"
+FABRIC_SKU_ORANGE_HEAVY = "orange-fence-heavy-duty"
+
+CAP_SKU_OSHA = "cap-osha"
+CAP_SKU_PLASTIC = "cap-plastic"
+
+# -------------------- Theme --------------------
+ui_dark = init_theme(apply_theme_fn=apply_theme, fix_select_colors_fn=fix_select_colors)
+st.markdown("<style>[data-testid='stSidebarNav']{display:none}</style>", unsafe_allow_html=True)
+
+with sidebar_card("Appearance", icon="🌓"):
+    ui_dark = render_toggle()
+
+apply_theme("dark" if ui_dark else "light")
+fix_select_colors(ui_dark)
+
+SIDEBAR_CFG.update(sidebar_skin(ui_dark))
+apply_sidebar_shell()
+
+def style_sidebar_buttons(is_dark: bool):
+    if is_dark:
+        bg, border, text, hoverbg, activebg, shadow = "#0f1b12", "#2e6d33", "#e8f5ea", "#17381b", "#112b15", "0 2px 8px rgba(0,0,0,.35)"
+    else:
+        bg, border, text, hoverbg, activebg, shadow = "#ffffff", "#2e6d33", "#0f172a", "#f5fbf6", "#eaf6ec", "0 2px 8px rgba(0,0,0,.08)"
+
+    st.markdown(
+        f"""
+        <style>
+          [data-testid="stSidebar"] .stButton > button {{
+            width: 100% !important;
+            background: {bg} !important;
+            color: {text} !important;
+            border: 2px solid {border} !important;
+            border-radius: 12px !important;
+            padding: 10px 12px !important;
+            font-weight: 700 !important;
+            box-shadow: {shadow} !important;
+            transition: background .15s ease, transform .04s ease;
+          }}
+          [data-testid="stSidebar"] .stButton > button:hover {{ background: {hoverbg} !important; }}
+          [data-testid="stSidebar"] .stButton > button:active {{ background: {activebg} !important; transform: translateY(1px); }}
+          [data-testid="stSidebar"] .stButton > button[kind="primary"] {{ background: {bg} !important; color: {text} !important; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+style_sidebar_buttons(ui_dark)
+
+# -------------------- Navigation --------------------
+def _preserve_theme_param(is_dark: bool):
+    try:
+        st.query_params.update({"theme": "dark" if is_dark else "light"})
+    except AttributeError:
+        st.experimental_set_query_params(theme="dark" if is_dark else "light")
+
+PAGES = {
+    "Home": "Home.py",
+    "Fencing Estimator": "pages/01_Fencing.py",
+    "Inlet Protection": "pages/02_Inlet_Protection.py",
+    "Construction Entrance": "pages/03_Construction_Entrance.py",
+    "Rock Filter Dams": "pages/04_Rock_Filter_Dams.py",
+    "Turf Establishment": "pages/05_Turf_Establishment.py",
+    "Aggregate": "pages/06_Aggregate.py",
+    "Material Summary": "pages/99_Material_Summary.py",
+}
+CURRENT_PAGE = "Fencing Estimator"
+with sidebar_card("Navigate", icon="🧭"):
+    st.markdown('<div id="nav-dd" style="display:none"></div>', unsafe_allow_html=True)
+    choice = st.selectbox(
+        "Go to page",
+        ["— Select —", *PAGES.keys()],
+        index=1 + list(PAGES.keys()).index(CURRENT_PAGE),
+        key="nav_choice_fencing",
+    )
+    if choice != "— Select —" and choice in PAGES and choice != CURRENT_PAGE:
+        _preserve_theme_param(st.session_state.get("ui_dark", False))
+        st.switch_page(PAGES[choice])
+
+# -------------------- Project / Customer --------------------
+# -------------------- Project / Customer --------------------
+with sidebar_card(
+    "Project / Customer",
+    icon="📋",
+    bg=("#0f1b12" if ui_dark else "#ffffff"),
+    border="2px solid #2e6d33",
+    radius_px=20,
+    pad_x=12,
+    pad_y=12,
+):
+    st.text_input(
+        "Project Title:",
+        key="project_name",
+        value=st.session_state.get("project_name", ""),
+        placeholder="e.g., Lakeside Retail – Phase 2",
+    )
+    st.text_input(
+        "Customer Name:",
+        key="company_name",
+        value=st.session_state.get("company_name", ""),
+        placeholder="e.g., ACME Builders",
+    )
+    st.text_input(
+        "Address:",
+        key="project_address",
+        value=st.session_state.get("project_address", ""),
+        placeholder="e.g., 1234 Main St, Austin, TX",
+    )
+
+COMPANY_NAME = e(st.session_state.get("company_name", ""))
+PROJECT_NAME = e(st.session_state.get("project_name", ""))
+PROJECT_ADDR = e(st.session_state.get("project_address", ""))
+
+# -------------------- Safe defaults --------------------
+fencing_category = "Silt Fence"   # or "Plastic Orange Fence"
+gauge_option = "14 Gauge"
+orange_duty = "Light Duty"
+
+total_job_footage = 1000
+waste_pct = 2
+cost_per_lf = 0.0
+post_type = ""
+post_unit_cost = 0.0
+post_spacing_ft = 0
+include_caps = False
+cap_type = None
+final_price_per_lf = 2.50
+_tax_rate_default = getattr(cfg, "SALES_TAX_RATE", 0.0825)
+
+# -------------------- Fencing Options --------------------
+with sidebar_card(
+    "Fencing Options",
+    icon="🛠️",
+    bg=("#0f1b12" if ui_dark else "#ffffff"),
+    border=("2px solid #8fd095" if ui_dark else "3px solid #2e6d33"),
+    pad_x=12,
+    pad_y=12,
+    radius_px=12,
+    shadow=("0 4px 14px rgba(0,0,0,.40)" if ui_dark else "0 4px 14px rgba(0,0,0,.06)"),
+):
+    total_job_footage = st.number_input("Total Job Footage (ft):", min_value=0, max_value=1_000_000, value=1000, step=1, key="fence_total_lf", help="Enter total linear feet from plans (before waste).")
+    waste_pct = st.number_input("Waste %:", min_value=0, max_value=10, value=2, step=1, key="fence_waste_pct", help="Waste/overlap allowance.")
+    fencing_category = st.selectbox("Fencing Material:", ["Silt Fence", "Plastic Orange Fence"], key="fence_category", help="Choose between silt fence and plastic orange (tree) fencing.")
+
+    if fencing_category == "Silt Fence":
+        post_type = "T-Post"
+        gauge_option = st.selectbox("Silt Fence Gauge:", ["14 Gauge", "12.5 Gauge"], key="sf_gauge")
+        post_spacing_ft = st.selectbox("T-Post Spacing (ft):", options=[3, 4, 6, 8, 10], index=3, key="sf_post_spacing", help="Select T-post spacing per plan.")
+        final_price_per_lf = st.number_input("Final Price / LF:", min_value=0.00, max_value=100.00, value=2.50, step=0.01, key="sf_final_price")
+        include_caps = st.checkbox("Check for Caps", value=False, key="sf_caps", help="Add one safety cap per T-post.")
+        cap_type = st.selectbox("Cap Type:", ["OSHA-Approved ($3.90)", "Regular Plastic Cap ($1.05)"], index=0, key="sf_cap_type") if include_caps else None
+        removal_selected = st.checkbox("Add fence removal pricing", value=False, key="sf_removal", help="Show removal price per LF (labor + fuel; no materials).")
+        remove_tax_selected = st.checkbox("Remove sales tax from customer printout", value=st.session_state.get("remove_sales_tax", False), key="sf_remove_tax", help="If checked, customer printout will show $0.00 sales tax.")
+        st.session_state["remove_sales_tax"] = bool(remove_tax_selected)
+    else:
+        post_type = "T-Post"
+        orange_duty = st.selectbox("Orange Fence Duty:", ["Light Duty", "Heavy Duty"], key="orange_duty", help="Select fence strength.")
+        post_spacing_ft = st.selectbox("T-Post Spacing (ft):", options=[3, 4, 6, 8, 10], index=4, key="orange_post_spacing", help="Typical spacing is 10 ft.")
+        include_caps = False; cap_type = None
+        final_price_per_lf = st.number_input("Final Price / LF:", min_value=0.00, max_value=100.00, value=2.50, step=0.01, key="orange_final_price")
+        removal_selected = st.checkbox("Add fence removal pricing", value=False, key="orange_removal", help="Show removal price per LF (labor + fuel; no materials).")
+        remove_tax_selected = st.checkbox("Remove sales tax from customer printout", value=st.session_state.get("remove_sales_tax", False), key="orange_remove_tax", help="If checked, customer printout will show $0.00 sales tax.")
+        st.session_state["remove_sales_tax"] = bool(remove_tax_selected)
+
+# -------------------- Export Actions (seed the preview early) --------------------
+with sidebar_card("Export Actions", icon="📦"):
+    if st.button("➕ Add current selection to Export Preview", use_container_width=True, key="btn_seed_export_preview"):
+        locked = list(st.session_state.get("export_locked_lines", []))
+        for ln in _build_live_pack():
+            ln_locked = copy.deepcopy(ln)
+            ln_locked["_id"] = f"locked_{uuid.uuid4()}"
+            locked.append(ln_locked)
+        st.session_state["export_locked_lines"] = locked
+        st.session_state["preview_live_hidden_ids"] = []
+        st.success("Added current selection to export lines.")
+        st.rerun()
+
+# -------------------- Pricebook lookups --------------------
+if fencing_category == "Silt Fence":
+    if gauge_option.startswith("14"):
+        fabric_sku, fabric_default = FABRIC_SKU_14G, 0.32
+        post_sku, post_default = POST_SKU_T_POST_4FT, 1.80
+    else:
+        fabric_sku, fabric_default = FABRIC_SKU_125G, 0.38
+        post_sku, post_default = POST_SKU_TXDOT_T_POST_4FT, 2.15
+else:
+    if orange_duty.startswith("Light"):
+        fabric_sku, fabric_default = FABRIC_SKU_ORANGE_LIGHT, 0.30
+    else:
+        fabric_sku, fabric_default = FABRIC_SKU_ORANGE_HEAVY, 0.45
+    post_sku, post_default = POST_SKU_T_POST_6FT, 2.25
+
+selection_label = (f"{gauge_option} Silt Fence" if fencing_category == "Silt Fence" else f"Plastic Orange Fence – {orange_duty}")
+
+def get_price_or_warn(sku: str, unit: str, default_val: float, label: str) -> float:
+    try:
+        val = pricebook.get_price(sku, unit, default_val)
+        return val if val is not None else default_val
+    except Exception:  # noqa: BLE001
+        msg = f"Price not found for {label} (SKU: {sku}, {unit}); using default ${default_val:.2f}."
+        st.session_state["pricebook_warnings"].append(msg)
+        st.warning(msg)
+        return default_val
+
+cost_per_lf = get_price_or_warn(fabric_sku, "LF", fabric_default, f"Fabric ({selection_label}) / LF")
+post_unit_cost = get_price_or_warn(post_sku, "EA", post_default, f"Post ({post_sku}) / EA")
+
+caps_unit_cost = 0.0
+caps_sku_used = None
+if fencing_category == "Silt Fence" and post_type == "T-Post" and include_caps and cap_type:
+    if "OSHA" in cap_type:
+        caps_unit_cost = pricebook.get_price(CAP_SKU_OSHA, "EA", 3.90) or 3.90
+        caps_sku_used = CAP_SKU_OSHA
+    else:
+        caps_unit_cost = pricebook.get_price(CAP_SKU_PLASTIC, "EA", 1.05) or 1.05
+        caps_sku_used = CAP_SKU_PLASTIC
+
+# -------------------- Calculations --------------------
+required_ft = p.required_footage(total_job_footage, waste_pct)
+safe_spacing = max(1, int(post_spacing_ft or 0))
+posts_count = p.posts_needed(required_ft, safe_spacing)
+rolls = p.rolls_needed(required_ft)
+
+caps_label = None
+caps_qty = 0
+if fencing_category == "Silt Fence" and post_type == "T-Post" and include_caps and cap_type:
+    caps_label = "OSHA-Approved" if "OSHA" in cap_type else "Regular Plastic Cap"
+    caps_qty = posts_count
+
+caps_cost = caps_qty * caps_unit_cost
+
+fabric_cost, hardware_cost, materials_subtotal, tax = p.materials_breakdown(
+    required_ft, cost_per_lf, posts_count, post_unit_cost
+)
+
+materials_subtotal_all = materials_subtotal + caps_cost
+_tax_rate = _tax_rate_default
+tax_all = tax + caps_cost * _tax_rate
+
+def _calc_removal_pricing(required_ft: float, final_price_per_lf: float) -> tuple[float, float]:
+    if required_ft <= 0:
+        return 0.0, 0.0
+    unit = final_price_per_lf * 0.40
+    unit = max(unit, 1.15) if required_ft < 800 else max(unit, 0.90)
+    total = unit * required_ft
+    if total < 800:
+        total = 800.0
+        unit = total / required_ft
+    return unit, total
+
+removal_unit_price_lf, removal_total = (
+    _calc_removal_pricing(required_ft, final_price_per_lf) if 'removal_selected' in locals() and removal_selected else (0.0, 0.0)
+)
+
+# Production assumptions / costs
+PROD_LF_PER_DAY = getattr(cfg, "PRODUCTION_LF_PER_DAY", 3000)
+project_days = (required_ft / PROD_LF_PER_DAY) if required_ft > 0 else 0.0
+labor_per_day = p.get_labor_per_day()
+labor_cost = project_days * labor_per_day
+billing_days = math.ceil(project_days) if required_ft > 0 else 0
+fuel = p.fuel_cost(billing_days, any_work=required_ft > 0)
+days = billing_days
+
+unit_cost_lf = p.unit_cost_per_lf(required_ft, materials_subtotal_all, tax_all, labor_cost, fuel)
+
+# Customer-facing revenue & margin (caps IN, removal OUT of margin)
+removal_total = removal_total if "removal_total" in locals() else 0.0
+sell_total_main = (final_price_per_lf * required_ft) if required_ft > 0 else 0.0
+caps_revenue = (caps_unit_cost * caps_qty) if (caps_qty and caps_unit_cost) else 0.0
+removal_revenue = removal_total if ('removal_selected' in locals() and removal_selected and required_ft > 0) else 0.0
+
+customer_subtotal_display = sell_total_main + caps_revenue + removal_revenue
+remove_tax = bool(st.session_state.get("remove_sales_tax", False))
+customer_sales_tax = 0.0 if remove_tax else (customer_subtotal_display * _tax_rate)
+customer_total = customer_subtotal_display + customer_sales_tax
+
+internal_total_cost = materials_subtotal_all + tax_all + labor_cost + fuel
+subtotal_for_margin = sell_total_main + caps_revenue
+gross_profit = subtotal_for_margin - internal_total_cost
+profit_margin = (gross_profit / subtotal_for_margin) if subtotal_for_margin > 0 else 0.0
+profit_margin_install_only = p.margin(final_price_per_lf, unit_cost_lf) if required_ft > 0 else 0.0
+
+# -------------------- Live lines --------------------
+
+def _live_id(kind: str) -> str:
+    return f"live_{kind}"
+
+live_install_line = {
+    "_id": _live_id("install"),
+    "qty": int(required_ft),
+    "unit": "LF",
+    "item": (f"{gauge_option} Silt Fence" if fencing_category == "Silt Fence" else f"Plastic Orange Fence – {orange_duty}"),
+    "price_each": float(final_price_per_lf),
+    "line_total": float(final_price_per_lf) * int(required_ft),
+}
+
+live_caps_line = None
+if caps_qty > 0:
+    live_caps_line = {
+        "_id": _live_id("caps"),
+        "qty": int(caps_qty),
+        "unit": "EA",
+        "item": ("Safety Caps (OSHA)" if caps_label == "OSHA-Approved" else "Safety Caps (Plastic)"),
+        "price_each": float(caps_unit_cost),
+        "line_total": float(caps_unit_cost) * int(caps_qty),
+    }
+
+live_removal_line = None
+if 'removal_selected' in locals() and removal_selected and required_ft > 0:
+    live_removal_line = {
+        "_id": _live_id("removal"),
+        "qty": int(required_ft),
+        "unit": "LF",
+        "item": "Fence Removal",
+        "price_each": float(removal_unit_price_lf),
+        "line_total": float(removal_total),
+    }
+
+# Signature + append-don't-overwrite: lock ALL visible live rows when selection changes
+
+def _fence_signature() -> str:
+    if fencing_category == "Silt Fence":
+        return f"SF|{gauge_option}|{post_spacing_ft}"
+    else:
+        return f"OF|{orange_duty}|{post_spacing_ft}"
+
+current_sig = _fence_signature()
+last_sig = st.session_state.get("last_fence_signature")
+
+# Helper builders (single authoritative copies)
+
+def _num(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        try:
+            return float(str(x).replace(",", "").strip())
+        except Exception:
+            return float(default)
+
+
+def _build_live_pack():
+    """Collect current visible live lines (install/removal/caps), honoring hidden IDs."""
+    hidden_live = set(st.session_state.get("preview_live_hidden_ids", []))
+    pack = []
+    for ln in (live_install_line, live_removal_line, live_caps_line):
+        if ln and ln.get("_id") not in hidden_live:
+            pack.append(ln)
+    return pack
+
+
+def _sort_key(ln: dict):
+    """Install (LF, not removal) → Removal → Others."""
+    item = (ln.get("item") or "")
+    if ln.get("unit") == "LF" and "Removal" not in item:
+        return (0,)
+    if "Removal" in item:
+        return (1,)
+    return (2,)
+
+
+def _with_id(line: dict) -> dict:
+    return {**line, "_id": str(uuid.uuid4())}
+
+if last_sig is not None and last_sig != current_sig:
+    for ln in _build_live_pack():
+        st.session_state["export_locked_lines"].append(_with_id(ln))
+    st.session_state["preview_live_hidden_ids"] = []
+
+st.session_state["last_fence_signature"] = current_sig
+
+# -------------------- Sidebar: Status badge --------------------
+with sidebar_card("Status", icon="📊"):
+    target = 0.30
+    m = float(profit_margin or 0.0)
+    ok = m >= target
+    ratio = max(0.0, min(m / target, 1.0))
+
+    if ok:
+        above_ratio = max(0.0, min((m - target) / 0.30, 1.0))
+        scale = 1.00 + 0.25 * above_ratio
+    else:
+        scale = 0.85 + 0.05 * ratio
+
+    fs = max(14, int(18 * scale))
+    pad_y = max(0, int(6 * scale))
+    pad_x = max(40, int(12 * scale * 2))
+    border_w = max(0, int(2 * scale))
+
+    if not ok:
+        hue, sat = 0, 100
+        light_base = 50 + (88 - 70) * ratio
+        grad_start = f"hsl({hue}, {sat}%, {light_base + 4:.1f}%)"
+        grad_end = f"hsl({hue}, {sat}%, {light_base - 4}%)"
+        text_col = "#0f172a"; border_col = "#cc3232"; pad_y = max(20, int(10 * scale)); fs = max(24, int(18 * scale))
+    else:
+        hue, sat, light = 80, 85, 10
+        grad_start = f"hsl({hue}, {sat}%, {light + 8}%)"
+        grad_end = f"hsl({hue}, {sat}%, {light - 4}%)"
+        text_col = "#ffffff"; border_col = "#8fd095"; fs = max(24, int(20 * scale)); pad_y = max(10, int(10 * scale))
+
+    fill_pct = int(ratio * 100)
+    label = "PROFIT GOOD" if ok else "CHECK PROFIT"
+
+    st.markdown(
+        f"""
+         <style>
+           .status-wrap {{ display:flex; justify-content:center; margin:0 }}
+           .status-badge {{
+             position:relative; border:{border_w}px solid {border_col}; border-radius:10px;
+             padding:{pad_y}px {pad_x}px; background:linear-gradient(90deg, {grad_start} 20%, {grad_end} 100%);
+             color:{text_col} !important; -webkit-text-fill-color:{text_col} !important;
+             font-weight:800; font-size: 16px; line-height:0.4; overflow:hidden;
+             box-shadow:0 2px 8px rgba(0,0,0,.08);
+           }}
+           .status-badge .fill {{ position:absolute; left:0; top:0; bottom:0; width:{fill_pct}%;
+             background:linear-gradient(90deg, {grad_start} 0%, {grad_end} 100%); z-index:0; opacity:0.35; }}
+           .status-badge span {{ position:relative; z-index:1; white-space:nowrap; }}
+           .status-badge .pct {{ font-weight:700; font-size:{max(12, int(fs * 0.8))}px; opacity:.95; }}
+         </style>
+         <div class="status-wrap"><div class="status-badge"><div class="fill"></div>
+           <span>{label} &nbsp; <span class="pct">{m:.1%}</span></span>
+         </div></div>
+         """,
+        unsafe_allow_html=True,
+    )
+
+# ---------- Summary export plumbing (single source of truth) ----------
+
+def _write_summary_payload(preview_lines, subtotal, sales_tax, grand_total):
+    """Write BOTH the new and legacy keys so any summary page reads the data."""
+    st.session_state["summary_export_payload"] = {
+        "lines": preview_lines,
+        "subtotal": float(subtotal),
+        "sales_tax": float(sales_tax),
+        "grand_total": float(grand_total),
+        "exported_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "project_name": st.session_state.get("project_name", ""),
+        "company_name": st.session_state.get("company_name", ""),
+        "project_address": st.session_state.get("project_address", ""),
+        "remove_sales_tax": bool(st.session_state.get("remove_sales_tax", False)),
+    }
+    # Legacy mirror
+    st.session_state["export_quote_lines"] = list(preview_lines)
+
+
+def _navigate_to_summary():
+    try:
+        st.switch_page("pages/99_Material_Summary.py")
+    except Exception:
+        st.session_state["page"] = "summary"
+        st.rerun()
+
+
+def _export_preview_to_summary(preview_lines, subtotal, sales_tax, grand_total):
+    """Single authoritative exporter used by ALL buttons."""
+    _write_summary_payload(preview_lines, subtotal, sales_tax, grand_total)
+    _navigate_to_summary()
+
+# ---------- Snapshot builders (exactly mirrors the preview math) ----------
+
+def _synthesize_live_pack_from_current_selection():
+    pack = []
+    if (globals().get("required_ft", 0) or 0) > 0:
+        item_name = (f"{globals().get('gauge_option','14 Gauge')} Silt Fence"
+                     if globals().get("fencing_category") == "Silt Fence"
+                     else f"Plastic Orange Fence – {globals().get('orange_duty','Light Duty')}")
+        qty_lf = int(globals().get("required_ft", 0) or 0)
+        price_each = float(globals().get("final_price_per_lf", 0.0) or 0.0)
+        pack.append({
+            "_id": f"live_install_syn",
+            "qty": qty_lf, "unit": "LF", "item": item_name,
+            "price_each": price_each, "line_total": price_each * qty_lf,
+        })
+    if (globals().get("caps_qty", 0) or 0) > 0:
+        cap_cost = float(globals().get("caps_unit_cost", 0.0) or 0.0)
+        pack.append({
+            "_id": f"live_caps_syn",
+            "qty": int(globals().get("caps_qty", 0) or 0),
+            "unit": "EA",
+            "item": ("Safety Caps (OSHA)" if "OSHA" in str(globals().get("caps_label","")) else "Safety Caps (Plastic)"),
+            "price_each": cap_cost,
+            "line_total": cap_cost * int(globals().get("caps_qty", 0) or 0),
+        })
+    if globals().get("removal_selected") and (globals().get("required_ft", 0) or 0) > 0:
+        qty_lf = int(globals().get("required_ft", 0) or 0)
+        price_each = float(globals().get("removal_unit_price_lf", 0.0) or 0.0)
+        lt = float(globals().get("removal_total", price_each * qty_lf) or 0.0)
+        pack.append({
+            "_id": f"live_removal_syn",
+            "qty": qty_lf, "unit": "LF", "item": "Fence Removal",
+            "price_each": price_each, "line_total": lt if lt > 0 else price_each * qty_lf,
+        })
+    return pack
+
+
+def _get_customer_printout_snapshot(*, ignore_hidden: bool = False, allow_synthesize: bool = True):
+    hidden_live = set(() if ignore_hidden else st.session_state.get("preview_live_hidden_ids", []))
+
+    live_pack = []
+    for ln in (live_install_line, live_removal_line, live_caps_line):
+        if ln and ln.get("_id") not in hidden_live:
+            live_pack.append(ln)
+
+    if not live_pack and allow_synthesize:
+        live_pack = _synthesize_live_pack_from_current_selection()
+
+    locked = list(st.session_state.get("export_locked_lines", []))
+    preview_lines = sorted(locked + live_pack, key=_sort_key)
+
+    subtotal = 0.0
+    for ln in preview_lines:
+        qty = int(_num(ln.get("qty", ln.get("qty_lf", 0)), 0))
+        price_each = _num(ln.get("price_each", ln.get("price_per_lf", 0.0)), 0.0)
+        if price_each <= 0 and "Removal" in (ln.get("item") or ""):
+            price_each = float(globals().get("removal_unit_price_lf", 0.0))
+        lt_stored = _num(ln.get("line_total", 0.0), 0.0)
+        line_total = lt_stored if lt_stored > 0 else (price_each * qty)
+        subtotal += line_total
+
+    tax_rate = float(_tax_rate)
+    remove_tax_flag = bool(st.session_state.get("remove_sales_tax", False))
+    sales_tax = 0.0 if remove_tax_flag else (subtotal * tax_rate)
+    grand_total = subtotal + sales_tax
+    return preview_lines, subtotal, sales_tax, grand_total
+
+# -------------------- Excel styles + panel helpers --------------------
+
+def inject_excel_styles(dark: bool) -> None:
+    col_bg = "#afb0ae" if dark else "#89cd8f"
+    col_border = "#2e6d33" if dark else "#b2deb5"
+    grid = "#020603" if dark else "#dbead9"
+    header_bg = "#17381b" if dark else "#2e6d33"
+    header_text = "#ffffff"
+    label_col = "#000000"
+    value_col = "#000000"
+    alt_row = "#7e807d" if dark else "#f5fbf6"
+    shadow = "0 2px 10px rgba(0,0,0,.28)" if dark else "0 2px 10px rgba(0,0,0,.08)"
+
+    st.markdown(
+        f"""
+        <style>
+          .excel-col {{ background:{col_bg}; border:2.5px solid {col_border}; border-radius:12px; padding:10px 8px 12px; box-shadow:{shadow}; }}
+          .excel-title {{ margin:0 0 12px 0; font-weight:800; color:#000; border-bottom:2px dashed {col_border}; padding-bottom:6px; text-align:center; font-size:24px; }}
+          .excel-table {{ width:100%; border-collapse:separate; border-spacing:0; table-layout:auto; }}
+          .excel-table thead th {{ background:{header_bg}; color:{header_text}; text-align:center; padding:8px; font-weight:700; border:2px solid {grid}; white-space:nowrap; overflow:visible; text-overflow:ellipsis; }}
+          .excel-table tbody td {{ padding:8px 10px; font-size:16px; vertical-align:top; border-bottom:2px solid {grid}; border-left:2px solid {grid}; border-right:2px solid {grid}; background:transparent; }}
+          .excel-table tbody tr:nth-child(odd) td {{ background:{alt_row}; }}
+          .excel-table td:first-child {{ color:{label_col}; font-weight:600; width:50%; white-space:nowrap; overflow:visible; text-overflow:ellipsis; }}
+          .excel-table td:last-child  {{ color:{value_col}; text-align:right; white-space:nowrap; }}
+          .excel-table tbody tr:last-child td {{ border-top: 2px solid #2e6d33; font-weight: 700; font-size: 18px !important; }}
+          .del-btn {{ border: none; background: none; cursor: pointer; font-size: 18px; color: #cc3232; margin-left: 8px; }}
+          .del-btn:hover {{ color: #ff5555; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def excel_panel(title: str, rows: list[tuple[str, str]]) -> None:
+    def _row_html(lbl: str, val: str) -> str:
+        return f"<tr><td>{e(lbl)}</td><td>{val}</td></tr>"
+    body = "\n".join(_row_html(lbl, val) for lbl, val in rows)
+    st.markdown(
+        f"""
+        <div class="excel-col">
+          <h4 class="excel-title">{title}</h4>
+          <table class="excel-table" role="table" aria-label="{title}">
+            <thead><tr><th>Item</th><th>Value</th></tr></thead>
+            <tbody>{body}</tbody>
+          </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+inject_excel_styles(ui_dark)
+
+# -------------------- Cost Panels --------------------
+rows_cost_summary = [
+    ("Subtotal (excl. sales tax)", f"${customer_subtotal_display:,.2f}"),
+    (f"Sales Tax ({(0 if remove_tax else _tax_rate*100):.2f}%)", f"${customer_sales_tax:,.2f}"),
+    ("Customer Total", f"${customer_total:,.2f}"),
+    ("Gross Profit", f"${gross_profit:,.2f}"),
+]
+rows_total_costs = [
+    ("Total Material Cost", f"${materials_subtotal_all:,.2f}"),
+    ("Labor Cost", f"${labor_cost:,.2f}"),
+    ("Fuel", f"${fuel:,.2f}"),
+]
+if 'removal_selected' in locals() and removal_selected and required_ft > 0:
+    rows_total_costs.append(("Fence Removal", f"${removal_total:,.2f}"))
+rows_total_costs.append(("Final Price / LF (sell)", f"${final_price_per_lf:,.2f}"))
+
+rows_material_costs = [
+    ("Fabric (Silt Fence)" if fencing_category == "Silt Fence" else f"Plastic Orange Fence ({orange_duty})", f"${fabric_cost:,.2f}"),
+    ("T-Post Cost", f"${hardware_cost:,.2f}"),
+]
+if caps_qty > 0:
+    rows_material_costs.append((f"Safety Caps ({e(caps_label)})", f"${caps_cost:,.2f}"))
+rows_material_costs.append(("Total Material Cost", f"${materials_subtotal_all:,.2f}"))
+rows_material_costs.append(("Total Material Cost / LF", f"${(materials_subtotal_all / required_ft) if required_ft > 0 else 0.0:,.2f}"))
+
+c1, c2, c3 = st.columns([1, 1, 1], gap="large")
+with c1: excel_panel("Cost Summary", rows_cost_summary)
+with c2: excel_panel("Total Costs Breakdown", rows_total_costs)
+with c3: excel_panel("Material Cost Breakdown", rows_material_costs)
+
+st.markdown('<div style="height:24px"></div>', unsafe_allow_html=True)
+st.markdown('<div style="height:2px;display:flex;background:#020603;margin:16px 0"></div>', unsafe_allow_html=True)
+
+# -------------------- Profit Margin Gauge --------------------
+try:
+    m_val = float(profit_margin or 0.0) * 100.0
+    target_pct = 30.0
+    xmax = max(60.0, target_pct + 10.0, m_val + 10.0)
+    WIDTH_IN, HEIGHT_IN, BAR_HALF_H, TEXT_SIZE = 20.2, 0.5, 0.4, 15
+
+    if m_val < 20.0:
+        grad_colors, target_col = ["#5a1717", "#cc3232"], "#ff9d9d"
+    elif m_val < target_pct:
+        grad_colors, target_col = ["#7a5900", "#e6a700"], "#ffd27a"
+    else:
+        grad_colors, target_col = ["#1f5a22", "#44a04c"], "#a6e0ab"
+
+    cmap_val = mcolors.LinearSegmentedColormap.from_list("val_grad", grad_colors)
+    cmap_well = mcolors.LinearSegmentedColormap.from_list("well", ["#2b2b2b", "#1a1a1a"])
+
+    fig, ax = plt.subplots(figsize=(WIDTH_IN, HEIGHT_IN))
+    fig.patch.set_alpha(0); ax.set_facecolor("none")
+    ax.set_xlim(0, xmax); ax.set_ylim(-0.4, 0.4)
+    for s in ("left", "right", "top", "bottom"): ax.spines[s].set_visible(False)
+    ax.set_yticks([]); ax.set_xlabel("Profit Percentage (%)", color="#dddddd", fontsize=TEXT_SIZE)
+    ax.tick_params(axis="x", colors="#bbbbbb", labelsize=TEXT_SIZE + 1)
+
+    xgrad = np.linspace(0, 1, 512).reshape(1, -1)
+    ax.imshow(xgrad, extent=(0, xmax, -BAR_HALF_H - 0.06, BAR_HALF_H + 0.06), cmap=cmap_well, aspect="auto", zorder=1, origin="lower")
+    vgrad = np.linspace(0, 1, 512).reshape(1, -1)
+    ax.imshow(vgrad, extent=(0, max(0, m_val), -BAR_HALF_H, BAR_HALF_H), cmap=cmap_val, aspect="auto", zorder=2, origin="lower")
+
+    if m_val > 8:
+        gloss = np.exp(-((np.linspace(-1, 1, 64)) ** 2) / 0.4).reshape(-1, 1)
+        ax.imshow(gloss, extent=(0, m_val, 0.02, BAR_HALF_H), cmap=mcolors.LinearSegmentedColormap.from_list("gloss", ["white", "white"]), alpha=0.12, aspect="auto", zorder=3, origin="lower")
+
+    ax.axvline(target_pct, color=target_col, linestyle="--", linewidth=1.1, alpha=0.9, zorder=4)
+
+    label_text = f"{m_val:.1f}%"
+    if m_val >= 12:
+        ax.text(m_val * 0.5, 0, label_text, ha="center", va="center", color="#ffffff", fontweight="bold", fontsize=TEXT_SIZE, zorder=5)
+    else:
+        ax.text(m_val + xmax * 0.01, 0, label_text, ha="left", va="center", color="#ffffff", fontweight="bold", fontsize=TEXT_SIZE, zorder=5)
+
+    plt.tight_layout()
+    st.columns([1, 2, 1])[1].pyplot(fig, clear_figure=True)
+except Exception as _exc:  # noqa: BLE001
+    st.caption(f"(Chart error: {_exc})")
+
+# Double Oak – Fencing Estimator (Unified, Clean Rewrite with Export Preview Panel)
+# ------------------------------------------------------
+
+# (imports and setup unchanged ...)
+
+# -------------------- Customer Export Preview --------------------
+
+st.markdown(
+    """
+    <style>
+    table[aria-label="Customer Export Preview"] tbody td:nth-child(2),
+    table[aria-label="Customer Export Preview"] tbody td:nth-child(3),
+    table[aria-label="Customer Export Preview"] tbody td:nth-child(4) {
+      color: #000000 !important;
+      font-size:18px !important;
+    }
+    .excel-col.export-preview { background:#e0f2fe !important; border:2.5px solid #60a5fa !important; box-shadow:0 4px 14px rgba(96,165,250,.4) !important; }
+.excel-col.export-preview .excel-title { color:#1e3a8a !important; }
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _inject_customer_preview_col_styles():
+    COL_STYLE = {
+        1: {"width": "110px", "align": "center", "pad_y": 8, "pad_x": 8, "font_head": 16, "font_body": 16},
+        2: {"width": "auto", "align": "center", "pad_y": 8, "pad_x": 10, "font_head": 16, "font_body": 16},
+        3: {"width": "auto", "align": "center", "pad_y": 8, "pad_x": 10, "font_head": 16, "font_body": 16},
+        4: {"width": "auto", "align": "right", "pad_y": 8, "pad_x": 10, "font_head": 16, "font_body": 16},
+    }
+    css_parts = [
+        '<style id="customer-export-col-styles">',
+        'table[aria-label="Customer Export Preview"] { table-layout: fixed; width: 100%; }',
+    ]
+    for idx, s in COL_STYLE.items():
+        css_parts.append(
+            f'table[aria-label="Customer Export Preview"] thead th:nth-child({idx}) '
+            f'{{ width:{s["width"]}; text-align:{s["align"]}; padding:{s["pad_y"]}px {s["pad_x"]}px; font-size:{s["font_head"]}px; }}'
+        )
+        css_parts.append(
+            f'table[aria-label="Customer Export Preview"] tbody td:nth-child({idx}) '
+            f'{{ text-align:{s["align"]}; padding:{s["pad_y"]}px {s["pad_x"]}px; font-size:{s["font_body"]}px; }}'
+        )
+    css_parts.append("</style>")
+    st.markdown("".join(css_parts), unsafe_allow_html=True)
+
+
+def _render_customer_export_preview():
+    preview_lines = list(st.session_state.get("export_locked_lines", [])) + _build_live_pack()
+    if not preview_lines:
+        st.caption("No exports yet. Use **Add current selection** when ready.")
+        return
+
+    # Try Ag-Grid for rich table with trash icon
+    try:
+        from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+    except Exception as _e:
+        st.error("st-aggrid is not installed. Please add 'streamlit-aggrid' to your environment.")
+        return
+
+    # Build data rows for the grid
+    rows = []
+    for ln in sorted(preview_lines, key=_sort_key):
+        rid = str(ln.get("_id") or f"anon_{uuid.uuid4()}")
+        qty = int(_num(ln.get("qty", ln.get("qty_lf", 0)), 0))
+        unit = ln.get("unit") or ("LF" if ("qty_lf" in ln) else "")
+        item = ln.get("item", "") or ""
+        price_each = _num(ln.get("price_each", ln.get("price_per_lf", 0.0)), 0.0)
+        if price_each <= 0 and "Removal" in item:
+            price_each = float(globals().get("removal_unit_price_lf", 0.0))
+        line_total = _num(ln.get("line_total", 0.0), 0.0)
+        if line_total <= 0:
+            line_total = price_each * qty
+        rows.append({
+            "_id": rid,
+            "Qty": qty,
+            "Item": item,
+            "Unit": unit,
+            "Price Each": float(price_each),
+            "Line Total": float(line_total),
+            "_delete": False,
+        })
+
+    import pandas as pd
+    df = pd.DataFrame(rows)
+
+    st.markdown("#### Customer Printout Preview")
+
+    # Define a trash-can renderer that toggles the _delete field
+    trash_renderer = JsCode(
+        """
+        function(params) {
+          const btn = document.createElement('button');
+          btn.innerText = '🗑️';
+          btn.style.border = 'none';
+          btn.style.background = 'transparent';
+          btn.style.cursor = 'pointer';
+          btn.style.fontSize = '16px';
+          btn.onclick = function(){
+            const api = params.api;
+            const row = params.node;
+            const data = {...row.data};
+            data._delete = !data._delete;
+            row.setData(data);
+          }
+          return btn;
+        }
+        """
+    )
+
+    if not HAS_AGGRID:
+        st.warning("Ag-Grid not available. Install `streamlit-aggrid` to enable the rich grid.")
+        st.data_editor(df.drop(columns=["_id"], errors="ignore"), hide_index=True, use_container_width=True)
+        return
+
+    # Build grid options as usual
+    gob = GridOptionsBuilder.from_dataframe(df)
+    gob.configure_default_column(editable=False, resizable=True)
+
+    # Columns (Qty | Item | Unit | Price Each | Line Total | 🗑️)
+    gob.configure_column("_id", hide=True)
+    gob.configure_column(
+        "Qty", type=["numericColumn"], editable=True, width=110,
+        valueParser=JsCode("function(p){ return Number(p.newValue)||0; }")
+    )
+    gob.configure_column("Item", editable=False, wrapText=True, autoHeight=True, flex=2)
+    gob.configure_column("Unit", editable=False, width=90)
+    gob.configure_column(
+        "Price Each", type=["numericColumn"], editable=True, width=140,
+        valueFormatter=JsCode("function(p){ return '$' + (Number(p.value||0).toFixed(2)); }"),
+        valueParser=JsCode("function(p){ return Number(p.newValue)||0; }")
+    )
+    gob.configure_column(
+        "Line Total", type=["numericColumn"], editable=False, width=150,
+        valueFormatter=JsCode("function(p){ return '$' + (Number(p.value||0).toFixed(2)); }")
+    )
+    gob.configure_column(
+        "_delete", headerName="", width=70, editable=False,
+        cellRenderer=JsCode("function(params){ return '🗑️'; }")
+    )
+    gob.configure_grid_options(suppressClickEdit=True)  # so clicking trash doesn't start editing
+
+    grid_options = gob.build()
+
+    # Attach handlers DIRECTLY on the options dict (most reliable)
+    grid_options["onCellClicked"] = JsCode("""
+    function(e){
+      if (e.colDef.field === '_delete') {
+        const d = Object.assign({}, e.data);
+        d._delete = !Boolean(d._delete);
+        e.api.applyTransaction({ update: [d] });
+      }
+    }
+    """)
+    grid_options["onCellValueChanged"] = JsCode("""
+    function(e){
+      if (e.colDef.field === 'Qty' || e.colDef.field === 'Price Each') {
+        e.data['Line Total'] = Number(e.data['Qty']||0) * Number(e.data['Price Each']||0);
+        e.api.applyTransaction({ update: [e.data] });
+      }
+    }
+    """)
+
+    grid = AgGrid(
+        df,
+        gridOptions=grid_options,
+        height=370,
+        data_return_mode="AS_INPUT",
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        fit_columns_on_grid_load=True,
+        allow_unsafe_jscode=True,  # <- required when using JsCode
+        theme="alpine",
+    )
+
+    edited = grid["data"].copy()
+    # Safety recompute in Python
+    edited["Line Total"] = (edited["Qty"].astype(float) * edited["Price Each"].astype(float)).round(2)
+    subtotal = float(edited["Line Total"].sum())
+    tax_rate = float(_tax_rate)
+    remove_tax_flag = bool(st.session_state.get("remove_sales_tax", False))
+    sales_tax = 0.0 if remove_tax_flag else (subtotal * tax_rate)
+    grand_total = subtotal + sales_tax
+
+    st.markdown("---")
+    _, r2 = st.columns([3.7, 1.6])
+    with r2:
+        st.markdown(f"**Subtotal:**  ${subtotal:,.2f}")
+        st.markdown(f"**Sales Tax ({(0 if remove_tax_flag else tax_rate*100):.2f}%){' (removed)' if remove_tax_flag else ''}:**  ${sales_tax:,.2f}")
+        st.markdown(f"**Grand Total:**  ${grand_total:,.2f}")
+
+    c_left, c_right = st.columns([1,1])
+    with c_left:
+        if st.button("💾 Apply table changes", use_container_width=True, key="btn_apply_changes_ag"):
+            # Deletions
+            to_delete_ids = set(edited.loc[edited["_delete"] == True, "_id"].tolist())
+            if to_delete_ids:
+                st.session_state["preview_live_hidden_ids"] = list(set(st.session_state.get("preview_live_hidden_ids", [])) | {rid for rid in to_delete_ids if rid.startswith("live_")})
+                st.session_state["export_locked_lines"] = [
+                    ln for ln in st.session_state.get("export_locked_lines", [])
+                    if str(ln.get("_id")) not in to_delete_ids
+                ]
+            # Edits (locked rows only)
+            locked_map = {str(ln.get("_id")): ln for ln in st.session_state.get("export_locked_lines", [])}
+            for _, row in edited.iterrows():
+                rid = str(row["_id"])
+                if rid in locked_map and rid not in to_delete_ids:
+                    ln = locked_map[rid]
+                    ln["qty"] = int(row["Qty"]) if pd.notna(row["Qty"]) else 0
+                    ln["price_each"] = float(row["Price Each"]) if pd.notna(row["Price Each"]) else 0.0
+                    ln["line_total"] = float(row["Line Total"]) if pd.notna(row["Line Total"]) else ln["price_each"] * ln["qty"]
+            st.session_state["export_locked_lines"] = list(locked_map.values())
+            st.success("Table changes applied.")
+            st.rerun()
+
+    with c_right:
+        if st.button("📄 Export to Summary", type="primary", use_container_width=True, key="btn_export_to_summary_ag"):
+            # Build export from edited table (ignoring rows marked for delete)
+            lines_to_export = []
+            for _, row in edited.iterrows():
+                if bool(row.get("_delete", False)):
+                    continue
+                rid = str(row["_id"])
+                qty = int(row["Qty"]) if pd.notna(row["Qty"]) else 0
+                price_each = float(row["Price Each"]) if pd.notna(row["Price Each"]) else 0.0
+                lt = float(row["Line Total"]) if pd.notna(row["Line Total"]) else price_each * qty
+                found = next((ln for ln in preview_lines if str(ln.get("_id")) == rid), None)
+                base = {"_id": rid, "qty": qty, "unit": row["Unit"], "item": row["Item"], "price_each": price_each, "line_total": lt}
+                if found:
+                    base.update({k: found[k] for k in ("sku_fabric","sku_post","sku_cap","post_spacing_ft") if k in found})
+                lines_to_export.append(base)
+            _subtotal = sum(float(ln.get("line_total", 0.0) or 0.0) for ln in lines_to_export)
+            _sales_tax = 0.0 if bool(st.session_state.get("remove_sales_tax", False)) else (_subtotal * float(_tax_rate))
+            _grand_total = _subtotal + _sales_tax
+            _export_preview_to_summary(lines_to_export, _subtotal, _sales_tax, _grand_total)
+
+# ✅ Render the preview ONCE
+_render_customer_export_preview()
+
+# -------------------- Integrity check --------------------
+
+total_cost = (unit_cost_lf * required_ft) if required_ft > 0 else 0.0
+if required_ft > 0:
+    recomputed = materials_subtotal_all + tax_all + labor_cost + fuel
+    if abs(recomputed - total_cost) > 0.01:
+        st.warning(f"Cost integrity check: unit_cost_lf*LF (${total_cost:,.2f}) != sum of parts (${recomputed:,.2f}).")
+
+material_cost_per_lf = (materials_subtotal_all / required_ft) if required_ft > 0 else 0.0
+
+# -------------------- Optional helper for other two-col tables --------------------
+
+def _inject_two_col_panel_styles(panel_title: str, col1=None, col2=None, table_layout: str = "auto"):
+    col1 = col1 or {}; col2 = col2 or {}
+    def _css_for(idx: int, s: dict) -> str:
+        w = s.get("width", "auto")
+        minw = s.get("min_width"); maxw = s.get("max_width")
+        alg = s.get("align", "left")
+        py = int(s.get("pad_y", 8)); px = int(s.get("pad_x", 8))
+        fh = int(s.get("font_head", 16)); fb = int(s.get("font_body", 16))
+        extra_head = (f"min-width:{minw};" if minw else "") + (f"max-width:{maxw};" if maxw else "")
+        extra_body = (f"min-width:{minw};" if minw else "") + (f"max-width:{maxw};" if maxw else "")
+        return (
+            f'table[aria-label="{panel_title}"] thead th:nth-child({idx})'
+            f'{{width:{w}; text-align:{alg}; padding:{py}px {px}px; font-size:{fh}px; {extra_head}}}'
+            f'table[aria-label="{panel_title}"] tbody td:nth-child({idx})'
+            f'{{text-align:{alg}; padding:{py}px {px}px; font-size:{fb}px; {extra_body}}}'
+        )
+    css = (
+        f'<style id="{panel_title.replace(" ", "-").lower()}-col-styles">'
+        f'table[aria-label="{panel_title}"]{{table-layout:{table_layout}; width:100%;}}'
+        f'{_css_for(1, col1)}{_css_for(2, col2)}'
+        f'</style>'
+    )
+    st.markdown(css, unsafe_allow_html=True)

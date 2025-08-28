@@ -1,0 +1,275 @@
+# pages/03_Construction_Entrance.py
+import base64
+import datetime as dt
+import streamlit as st
+from streamlit.components.v1 import html as st_html  # (not used yet, kept for parity)
+from core.sanitize import e, srcdoc_escape
+from core.theme_persist import init_theme, render_toggle, sidebar_skin, nav_colors
+from core.theme import apply_theme, fix_select_colors
+from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
+from core import pricing as p
+from core import settings as cfg
+from core import cart
+
+# --- Page config: FIRST ---
+st.set_page_config(
+    page_title="Double Oak – Construction Entrance",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
+
+# Theme init & apply (persists via session + ?theme=dark|light)
+ui_dark = init_theme(apply_theme_fn=apply_theme, fix_select_colors_fn=fix_select_colors)
+
+# Hide Streamlit chrome
+st.markdown("""
+<style>
+header[data-testid="stHeader"]{display:none}
+#MainMenu{visibility:hidden}
+footer{visibility:hidden}
+div.block-container{padding-top:1rem}
+</style>
+""", unsafe_allow_html=True)
+
+# Sidebar: Appearance (render ONCE)
+with sidebar_card("Appearance", icon="🌓"):
+    ui_dark = render_toggle()  # distinct widget key under the hood
+
+# Sidebar skin + shell (apply ONCE)
+SIDEBAR_CFG.update(sidebar_skin(ui_dark))
+apply_sidebar_shell()
+
+# Hide built-in page list
+st.markdown("<style>[data-testid='stSidebarNav']{display:none}</style>", unsafe_allow_html=True)
+
+# (Optional) nav/select colors for any styled selects you add later
+colors = nav_colors(ui_dark)
+NAV_LABEL_COLOR  = colors["NAV_LABEL_COLOR"]
+NAV_VALUE_COLOR  = colors["NAV_VALUE_COLOR"]
+NAV_MENU_BG      = colors["NAV_MENU_BG"]
+NAV_MENU_TEXT    = colors["NAV_MENU_TEXT"]
+NAV_INPUT_BG     = colors["NAV_INPUT_BG"]
+NAV_BORDER_COLOR = colors["NAV_BORDER_COLOR"]
+
+# ---------- Navigation ----------
+PAGES = {
+    "Home": "Home.py",
+    "Silt Fence": "pages/01_Silt_Fence.py",
+    "Inlet Protection": "pages/02_Inlet_Protection.py",
+    "Construction Entrance": "pages/03_Construction_Entrance.py",
+    "Rock Filter Dams": "pages/04_Rock_Filter_Dams.py",
+    "Turf Establishment": "pages/05_Turf_Establishment.py",
+    "Aggregate": "pages/06_Aggregate.py",
+    "Material Summary": "pages/99_Material_Summary.py",
+}
+CURRENT_PAGE = "Construction Entrance"
+
+with sidebar_card("Navigate", icon="🧭", bg=("#0f1b12" if ui_dark else "#ffffff"), shadow="0 4px 14px rgba(0,0,0,.06)"):
+    # CSS scope marker (if you style this select with CSS elsewhere)
+    st.markdown('<div id="nav-dd" style="display:none"></div>', unsafe_allow_html=True)
+    sel = st.selectbox(
+        "Go to page",
+        ["— Select —", *PAGES.keys()],
+        index=1 + list(PAGES.keys()).index(CURRENT_PAGE),
+        key="nav_choice_ce",  # unique key for this page
+    )
+    if sel != "— Select —" and sel != CURRENT_PAGE:
+        # keep theme sticky across pages
+        st.query_params.update({"theme": "dark" if st.session_state.get("ui_dark") else "light"})
+        st.switch_page(PAGES[sel])
+
+COMPANY_NAME = e(st.session_state.get("company_name", "Double Oak"))
+PROJECT_NAME = e(st.session_state.get("project_name", ""))
+PROJECT_ADDR = e(st.session_state.get("project_address", ""))
+
+# ---------- Sidebar: Construction Entrance Options ----------
+tax_rate = getattr(cfg, "SALES_TAX_RATE", 0.0825)
+
+with sidebar_card("Construction Entrance Options", icon="🛠️", bg=("#0f1b12" if ui_dark else "#ffffff"), shadow="0 4px 14px rgba(0,0,0,.06)"):
+    qty = st.number_input(
+        "Number of Entrances (EA):",
+        min_value=0, step=1, value=1,
+        help="Total entrances to build.",
+        key="ce_qty",
+    )
+    length_ft = st.number_input(
+        "Pad Length (ft):",
+        min_value=0, step=1, value=50,
+        help="Typical spec is 30–70 ft.",
+        key="ce_len_ft",
+    )
+    width_ft = st.number_input(
+        "Pad Width (ft):",
+        min_value=0, step=1, value=12,
+        help="Match the driveway width or plan sheet.",
+        key="ce_wid_ft",
+    )
+    thickness_in = st.number_input(
+        "Stone Thickness (in):",
+        min_value=0, step=1, value=6,
+        help="Commonly 6–12 inches.",
+        key="ce_thickness_in",
+    )
+    cost_per_ton = st.number_input(
+        "Stone Cost / Ton:",
+        min_value=0.0, step=0.5, value=18.0,
+        help="Delivered cost for #57/Flex Base as specified.",
+        key="ce_cost_per_ton",
+    )
+    stone_tons_per_cuyd = st.number_input(
+        "Stone Density (tons / cu yd):",
+        min_value=0.0, step=0.05, value=1.40,
+        help="Typical crushed stone ~1.35–1.55 tons/cu yd.",
+        key="ce_ton_per_cuyd",
+    )
+    fabric_cost_per_sy = st.number_input(
+        "Geotextile Cost / SY:",
+        min_value=0.0, step=0.05, value=1.20,
+        help="Cost per square yard of separator fabric.",
+        key="ce_fabric_sy_cost",
+    )
+    labor_minutes_per_entrance = st.number_input(
+        "Labor Minutes / Entrance:",
+        min_value=0, step=5, value=240,
+        help="Crew minutes per entrance (grading, fabric, stone).",
+        key="ce_labor_min",
+    )
+    final_price_per_entrance = st.number_input(
+        "Final Price / Entrance:",
+        min_value=0.0, step=25.0, value=1800.0,
+        help="Customer price per entrance installed.",
+        key="ce_final_price",
+    )
+
+# ---------- Calculations ----------
+# Volume per entrance
+volume_cuft = length_ft * width_ft * (thickness_in / 12.0)
+volume_cuyd = volume_cuft / 27.0
+stone_tons_each = volume_cuyd * stone_tons_per_cuyd
+total_stone_tons = stone_tons_each * qty
+
+# Fabric area (square yards)
+fabric_sy_each = (length_ft * width_ft) / 9.0
+total_fabric_sy = fabric_sy_each * qty
+
+# Costs
+stone_cost = total_stone_tons * cost_per_ton
+fabric_cost = total_fabric_sy * fabric_cost_per_sy
+materials_subtotal = stone_cost + fabric_cost
+tax = materials_subtotal * tax_rate
+
+# Labor & fuel
+total_minutes = qty * labor_minutes_per_entrance
+days = p.job_days_inlet(total_minutes)  # minute-based -> days helper
+labor_per_day = p.get_labor_per_day()
+labor_cost = days * labor_per_day
+fuel = p.fuel_cost(days, any_work=qty > 0)
+
+# Unit cost per entrance (treat entrances as "units")
+unit_cost = p.unit_cost_per_unit(qty, materials_subtotal, tax, labor_cost, fuel)
+
+# Pricing
+sell_total = final_price_per_entrance * qty if qty > 0 else 0.0
+price_effective = final_price_per_entrance or 0.0001
+profit_margin = p.margin(price_effective, unit_cost)
+gross_profit = sell_total - (materials_subtotal + tax + labor_cost + fuel)
+
+# ---------- Sidebar: Status ----------
+with sidebar_card("Status", icon="📊", bg=("#0f1b12" if ui_dark else "#ffffff")):
+    ok = profit_margin >= 0.30
+    badge_bg   = "#dcfce7" if ok else "#fee2e2"
+    badge_text = "#065f46" if ok else "#991b1b"
+    badge_bd   = "#16a34a" if ok else "#ef4444"
+    label      = "ON TARGET (≥30%)" if ok else "UNDER 30%"
+    st.markdown(
+        f"""
+        <div style="text-align:center; margin:8px 0 12px 0;">
+          <span style="
+            display:inline-block;
+            padding:2px 12px;
+            border-radius:999px;
+            background:{badge_bg};
+            color:{badge_text};
+            border:3px solid {badge_bd};
+            font-weight:600;">
+            {label} {profit_margin:.1%}
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ---------- Sidebar: Export ----------
+with sidebar_card("Export", icon="⬇️", bg=("#0f1b12" if ui_dark else "#ffffff")):
+    disabled = qty <= 0
+    if st.button("Export to Material Summary", use_container_width=True, disabled=disabled):
+        cart.add_item(
+            sku="Construction Entrance",
+            description=f"{length_ft}ft x {width_ft}ft x {thickness_in}in",
+            unit="EA",
+            qty=qty,
+            source_page="Construction Entrance",
+            notes=f"Stone ~{total_stone_tons:.2f} tons; Fabric ~{total_fabric_sy:.1f} SY",
+        )
+        st.success("Exported to Material Summary.")
+        try:
+            st.switch_page("pages/99_Material_Summary.py")
+        except Exception:
+            pass
+
+# ---------- Header ----------
+def _load_logo_b64(path="assets/logo.png"):
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except Exception:
+        return None
+
+LOGO_B64 = st.session_state.get("logo_b64") or _load_logo_b64()
+if LOGO_B64:
+    st.session_state["logo_b64"] = LOGO_B64
+
+COMPANY_NAME = st.session_state.get("company_name", "Double Oak")
+PROJECT_NAME = st.session_state.get("project_name", "")
+PROJECT_ADDR = st.session_state.get("project_address", "")
+
+left, right = st.columns([1, 5], vertical_alignment="center")
+with left:
+    if LOGO_B64:
+        st.markdown(f'<img src="data:image/png;base64,{LOGO_B64}" style="max-height:64px;">', unsafe_allow_html=True)
+with right:
+    st.markdown(
+        f"<div style='line-height:1.2'>"
+        f"<h1 style='margin:0'>Construction Entrance Estimate</h1>"
+        f"<div style='color:#555'>{COMPANY_NAME}{' — ' + PROJECT_NAME if PROJECT_NAME else ''}</div>"
+        f"{f'<div style=\"color:#555\">{PROJECT_ADDR}</div>' if PROJECT_ADDR else ''}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+# ---------- Main estimate ----------
+today = dt.datetime.now().strftime("%m/%d/%Y")
+with st.container(border=True):
+    st.markdown(
+        f"""
+**Construction Entrance Estimate**
+- **Entrances:** {qty}  
+- **Pad Size:** {length_ft} ft × {width_ft} ft × {thickness_in} in  
+- **Stone (tons per entrance):** {stone_tons_each:.2f}  → **Total:** {total_stone_tons:.2f} tons  
+- **Fabric (SY per entrance):** {fabric_sy_each:.1f}  → **Total:** {total_fabric_sy:.1f} SY  
+- **Stone Cost:** ${stone_cost:,.2f}  
+- **Fabric Cost:** ${fabric_cost:,.2f}  
+- **Materials Subtotal:** ${materials_subtotal:,.2f}  
+- **Sales Tax ({tax_rate*100:.2f}%):** ${tax:,.2f}  
+- **Labor (crew {cfg.LOCKED_CREW_SIZE}):** ${labor_cost:,.2f}  
+- **Fuel:** ${fuel:,.2f}  
+- **Unit Cost (tax + labor + fuel):** ${unit_cost:,.2f} / entrance  
+- **Final Price:** ${final_price_per_entrance:,.2f} / entrance  
+- **Profit Margin:** {profit_margin:.1%}  
+- **Gross Profit:** ${gross_profit:,.2f}  
+- **Grand Total:** ${sell_total:,.2f}  
+*Estimate date: {today}*
+        """
+    )
