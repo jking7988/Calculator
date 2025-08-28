@@ -7,7 +7,7 @@ from core.theme import apply_theme, fix_select_colors
 from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
 from utils import pricing
 # or directly
-from utils.pricing import load_pricing_table, get_item
+
 
 with st.sidebar:
     st.subheader("📂 Pricebook")
@@ -16,7 +16,7 @@ with st.sidebar:
         st.session_state["pricebook_name"] = f.name
         st.session_state["pricebook_bytes"] = f.getvalue()
         st.success(f"Loaded: {f.name}")
-        st.cache_data.clear()  # invalidate any cached reads
+        st.cache_data.clear()
 
 st.title("Double Oak Estimator")
 

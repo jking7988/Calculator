@@ -17,16 +17,9 @@ from core import pricing as p
 from core import settings as cfg
 from core import pricebook
 
-pricebook.ensure_loaded()  # now uses uploaded file or bundled fallback
-
-sf = pricebook.get_item("silt-fence-12g5")
-if sf:
-    st.write(f"12.5 Gauge Silt Fence ({sf['unit']}) — ${float(sf['price']):,.2f}")
-else:
-    st.warning("silt-fence-12g5 not found in the pricebook.")
-
-sf_price = pricebook.get_price("silt-fence-12g5", 0.0) or 0.0
-unit = pricebook.get_table().loc["silt-fence-12g5"]["unit"] if "silt-fence-12g5" in pricebook.get_table().index else "LF"
+pricebook.ensure_loaded()
+item = pricebook.get_item("silt-fence-12g5")
+price = pricebook.get_price("silt-fence-12g5", 0.0)
 
 st.write(f"12.5 Gauge Silt Fence ({unit}) — ${sf_price:,.2f}")
 
