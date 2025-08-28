@@ -1,111 +1,25 @@
 # Double Oak – Fencing Estimator (Unified, Clean Rewrite)
 # ------------------------------------------------------
-
-import math
-import uuid
-import copy
-import html
+import math, uuid, copy, html
 import numpy as np
+import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+    HAS_AGGRID = True
+except Exception:
+    HAS_AGGRID = False
+
 from datetime import datetime
 from core.theme_persist import init_theme, render_toggle, sidebar_skin
 from core.theme import apply_theme, fix_select_colors
 from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
-from core import pricing as p
 from core import settings as cfg
 from core import pricebook
 
 pricebook.ensure_loaded()
-item = pricebook.get_item("silt-fence-12g5")
-price = pricebook.get_price("silt-fence-12g5", 0.0)
-
-st.write(f"12.5 Gauge Silt Fence ({unit}) — ${sf_price:,.2f}")
-
-if uploaded:
-    try:
-        pricing = load_pricing_table(uploaded)
-
-        st.success("✅ Pricing file loaded")
-        with st.expander("Preview first rows"):
-            st.dataframe(pricing.head(20))
-
-        # Example lookups
-        sf = get_item(pricing, "silt-fence-12g5")
-        tpost = get_item(pricing, "t-post-6ft")
-
-        if sf:
-            st.write(f"12.5 Gauge Silt Fence — {sf['unit']} — ${float(sf['price']):,.2f}")
-        if tpost:
-            st.write(f"T-Post 6' — {tpost['unit']} — ${float(tpost['price']):,.2f}")
-
-        qty = st.number_input("Quantity (LF)", min_value=0.0, step=1.0, value=100.0)
-        if sf:
-            st.metric("Line total", f"${qty * float(sf['price']):,.2f}")
-
-    except Exception as e:
-        st.error(f"Problem reading file: {e}")
-else:
-    st.info("👆 Drop your Excel file above to load prices.")
-
-# banner (optional)
-try:
-    _, meta = current_pricing()
-    st.caption(format_version(meta))
-except Exception:
-    pass
-
-# Example: lookups for your actual codes
-sf_12g5_price = get_price("silt-fence-12g5") or 0.0
-sf_unrein_price = get_price("silt-fence-unreinforced") or 0.0
-tpost_price = get_price("t-post-6ft") or 0.0
-wood_stake_price = get_price("wood-stake") or 0.0
-
-st.write(f"12.5 Gauge Silt Fence ({get_unit('silt-fence-12g5')}) — ${sf_12g5_price:,.2f}")
-st.write(f"Un-Reinforced Silt Fence ({get_unit('silt-fence-unreinforced')}) — ${sf_unrein_price:,.2f}")
-
-qty = st.number_input("Quantity (LF for fence; EA for posts/stakes)", min_value=0.0, step=1.0, value=100.0)
-
-# Example line total for 12.5g fence fabric only:
-st.metric("Fabric Line Total", f"${qty * sf_12g5_price:,.2f}")
-
-# If you have an assembly: e.g., fabric + 1 stake every 8 LF + 1 T-post every 50 LF:
-stakes_per_lf = 1/8
-tposts_per_lf = 1/50
-assembly_total = (sf_12g5_price) \
-               + (stakes_per_lf * wood_stake_price) \
-               + (tposts_per_lf * tpost_price)
-
-st.metric("Per-LF Assembly Cost (example)", f"${assembly_total:,.2f}")
-st.metric("Assembly Total (example)", f"${assembly_total * qty:,.2f}")
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
-    HAS_AGGRID = True
-except ImportError:
-    HAS_AGGRID = False
-
-from utils.pricing import load_pricing_table, get_price, get_unit, get_item
-
-st.caption("Prices are loaded from S3 and auto-refresh when the file is updated.")
-
-# Show first few lines during development
-with st.expander("📄 Pricing preview (dev)"):
-    st.dataframe(load_pricing_table().head(20), use_container_width=True)
-
-# Example lookups with your actual codes from the sheet:
-sf_12g5_price = get_price("silt-fence-12g5")
-sf_unrein_price = get_price("silt-fence-unreinforced")
-tpost_price = get_price("t-post-6ft")
-
-st.write(f"12.5 Gauge Silt Fence (per {get_unit('silt-fence-12g5')}): ${sf_12g5_price}")
-st.write(f"Un-Reinforced Silt Fence (per {get_unit('silt-fence-unreinforced')}): ${sf_unrein_price}")
-st.write(f"T-Post 6' (per {get_unit('t-post-6ft')}): ${tpost_price}")
-
-# Compute a line total (qty is in the same unit as the item’s unit)
-qty = st.number_input("Quantity (matches item unit)", min_value=0.0, step=1.0, value=100.0)
-line_total = qty * (sf_12g5_price or 0.0)
-st.metric("Line total", f"${line_total:,.2f}")
 
 # -------------------- Page + Global CSS --------------------
 st.set_page_config(
@@ -143,6 +57,11 @@ st.session_state.setdefault("remove_sales_tax", False)
 
 # Ensure pricebook is loaded before we start reading prices
 pricebook.ensure_loaded()
+
+# Example: show a couple of items using the S3/bundled/ uploaded pricebook
+_item = pricebook.get_item("silt-fence-12g5")
+if _item:
+    st.write(f"12.5 Gauge Silt Fence ({_item['unit']}) — ${float(_item['price']):,.2f}")
 
 # -------------------- Constants / SKUs --------------------
 FABRIC_SKU_14G = "silt-fence-14g"
@@ -328,51 +247,78 @@ with sidebar_card("Export Actions", icon="📦"):
         st.success("Added current selection to export lines.")
         st.rerun()
 
-# -------------------- Pricebook lookups --------------------
-if fencing_category == "Silt Fence":
-    if gauge_option.startswith("14"):
-        fabric_sku, fabric_default = FABRIC_SKU_14G, 0.32
-        post_sku, post_default = POST_SKU_T_POST_4FT, 1.80
-    else:
-        fabric_sku, fabric_default = FABRIC_SKU_125G, 0.38
-        post_sku, post_default = POST_SKU_TXDOT_T_POST_4FT, 2.15
-else:
-    if orange_duty.startswith("Light"):
-        fabric_sku, fabric_default = FABRIC_SKU_ORANGE_LIGHT, 0.30
-    else:
-        fabric_sku, fabric_default = FABRIC_SKU_ORANGE_HEAVY, 0.45
-    post_sku, post_default = POST_SKU_T_POST_6FT, 2.25
-
-selection_label = (f"{gauge_option} Silt Fence" if fencing_category == "Silt Fence" else f"Plastic Orange Fence – {orange_duty}")
-
-def get_price_or_warn(sku: str, unit: str, default_val: float, label: str) -> float:
+def get_price_or_warn(sku: str, default_val: float, label: str) -> float:
     try:
-        val = pricebook.get_price(sku, unit, default_val)
-        return val if val is not None else default_val
-    except Exception:  # noqa: BLE001
-        msg = f"Price not found for {label} (SKU: {sku}, {unit}); using default ${default_val:.2f}."
-        st.session_state["pricebook_warnings"].append(msg)
+        val = pricebook.get_price(sku, default_val)
+        return default_val if val is None else float(val)
+    except Exception:
+        msg = f"Price not found for {label} (SKU: {sku}); using default ${default_val:.2f}."
+        st.session_state.setdefault("pricebook_warnings", []).append(msg)
         st.warning(msg)
         return default_val
 
-cost_per_lf = get_price_or_warn(fabric_sku, "LF", fabric_default, f"Fabric ({selection_label}) / LF")
-post_unit_cost = get_price_or_warn(post_sku, "EA", post_default, f"Post ({post_sku}) / EA")
+if fencing_category == "Silt Fence":
+    if gauge_option.startswith("14"):
+        fabric_sku, fabric_default = "silt-fence-14g", 0.32
+        post_sku, post_default     = "t-post-4ft", 1.80
+    else:
+        fabric_sku, fabric_default = "silt-fence-12g5", 0.38
+        post_sku, post_default     = "tx-dot-t-post-4-ft", 2.15
+else:
+    if orange_duty.startswith("Light"):
+        fabric_sku, fabric_default = "orange-fence-light-duty", 0.30
+    else:
+        fabric_sku, fabric_default = "orange-fence-heavy-duty", 0.45
+    post_sku, post_default = "t-post-6ft", 2.25
+
+cost_per_lf   = get_price_or_warn(fabric_sku, fabric_default, f"Fabric ({gauge_option}) / LF")
+post_unit_cost = get_price_or_warn(post_sku,   post_default,   f"Post ({post_sku}) / EA")
+
+def get_unit_for(code: str, fallback: str = "") -> str:
+    item = pricebook.get_item(code)
+    return item["unit"] if item and "unit" in item else fallback
+
+st.write(f"Fabric {gauge_option} ({get_unit_for(fabric_sku,'LF')}) — ${cost_per_lf:,.2f}")
+st.write(f"Post {post_sku} ({get_unit_for(post_sku,'EA')}) — ${post_unit_cost:,.2f}")
 
 caps_unit_cost = 0.0
-caps_sku_used = None
+caps_sku_used  = None
 if fencing_category == "Silt Fence" and post_type == "T-Post" and include_caps and cap_type:
     if "OSHA" in cap_type:
-        caps_unit_cost = pricebook.get_price(CAP_SKU_OSHA, "EA", 3.90) or 3.90
-        caps_sku_used = CAP_SKU_OSHA
+        caps_sku_used  = "cap-osha"
+        caps_unit_cost = pricebook.get_price(caps_sku_used, 3.90) or 3.90
     else:
-        caps_unit_cost = pricebook.get_price(CAP_SKU_PLASTIC, "EA", 1.05) or 1.05
-        caps_sku_used = CAP_SKU_PLASTIC
+        caps_sku_used  = "cap-plastic"
+        caps_unit_cost = pricebook.get_price(caps_sku_used, 1.05) or 1.05
+
+# Minimal local implementations if not using a shared module:
+def required_footage(total_lf: float, waste_pct: float) -> float:
+    return max(0.0, float(total_lf)) * (1.0 + float(waste_pct)/100.0)
+
+def posts_needed(required_ft: float, spacing_ft: int) -> int:
+    if spacing_ft <= 0 or required_ft <= 0: return 0
+    return int(math.ceil(required_ft / spacing_ft)) + 1  # add one for start
+
+def rolls_needed(required_ft: float, roll_len: int = 100) -> int:
+    return int(math.ceil(required_ft / max(1, roll_len)))
+
+def get_labor_per_day() -> float:
+    return 800.0  # placeholder
+
+def fuel_cost(days: int, any_work: bool) -> float:
+    return 65.0 * max(0, days) if any_work else 0.0
+
+def unit_cost_per_lf(required_ft: float, mat_sub: float, tax: float, labor: float, fuel: float) -> float:
+    return (mat_sub + tax + labor + fuel) / required_ft if required_ft > 0 else 0.0
+
+def margin(sell_per_lf: float, unit_cost_per_lf_val: float) -> float:
+    return (sell_per_lf - unit_cost_per_lf_val) / sell_per_lf if sell_per_lf > 0 else 0.0
 
 # -------------------- Calculations --------------------
-required_ft = p.required_footage(total_job_footage, waste_pct)
+required_ft = required_footage(total_job_footage, waste_pct)
 safe_spacing = max(1, int(post_spacing_ft or 0))
-posts_count = p.posts_needed(required_ft, safe_spacing)
-rolls = p.rolls_needed(required_ft)
+posts_count = posts_needed(required_ft, safe_spacing)
+rolls = rolls_needed(required_ft)
 
 caps_label = None
 caps_qty = 0
@@ -414,7 +360,8 @@ billing_days = math.ceil(project_days) if required_ft > 0 else 0
 fuel = p.fuel_cost(billing_days, any_work=required_ft > 0)
 days = billing_days
 
-unit_cost_lf = p.unit_cost_per_lf(required_ft, materials_subtotal_all, tax_all, labor_cost, fuel)
+unit_cost_lf = unit_cost_per_lf(required_ft, materials_subtotal_all, tax_all, labor_cost, fuel)
+profit_margin_install_only = margin(final_price_per_lf, unit_cost_lf) if required_ft > 0 else 0.0
 
 # Customer-facing revenue & margin (caps IN, removal OUT of margin)
 removal_total = removal_total if "removal_total" in locals() else 0.0
