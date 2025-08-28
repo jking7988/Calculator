@@ -1,0 +1,48 @@
+=== Wed 08/27/2025 23:42:06.25 Starting update_and_launch_debug.bat === 
+Using venv Python: C:\double-oak-starter\.venv\Scripts\python.exe 
+Python 3.13.0
+1.37.0
+Running codemod: apply_export_preview_and_inputs.py 
+Modified: C:\double-oak-starter\pages\01_Silt_Fence.py
+Modified: C:\double-oak-starter\pages\02_Inlet_Protection.py
+Modified: C:\double-oak-starter\pages\03_Construction_Entrance.py
+Modified: C:\double-oak-starter\pages\04_Rock_Filter_Dams.py
+Modified: C:\double-oak-starter\pages\05_Turf_Establishment.py
+Modified: C:\double-oak-starter\pages\06_Aggregate.py
+Files with changes: 6
+Codemod completed. 
+Launching: streamlit run Home.py 
+2025-08-27 23:42:07.218 "browser.headless" is not a valid config option. If you previously had this config option set, it may have been removed.
+2025-08-27 23:42:07.219 "browser.enableCORS" is not a valid config option. If you previously had this config option set, it may have been removed.
+2025-08-27 23:42:07.219 "browser.enableXsrfProtection" is not a valid config option. If you previously had this config option set, it may have been removed.
+2025-08-27 23:42:07.219 "browser.cookieSecret" is not a valid config option. If you previously had this config option set, it may have been removed.
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://127.0.0.1:8501
+
+C:\double-oak-starter\pages\01_Silt_Fence.py:719: UserWarning: Tight layout not applied. The bottom and top margins cannot be made large enough to accommodate all Axes decorations.
+  plt.tight_layout()
+C:\double-oak-starter\pages\01_Silt_Fence.py:719: UserWarning: Tight layout not applied. The bottom and top margins cannot be made large enough to accommodate all Axes decorations.
+  plt.tight_layout()
+2025-08-27 23:44:35.068 Uncaught app exception
+Traceback (most recent call last):
+  File "C:\double-oak-starter\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 75, in exec_func_with_error_handling
+    result = func()
+  File "C:\double-oak-starter\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 574, in code_to_exec
+    exec(code, module.__dict__)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\double-oak-starter\pages\01_Silt_Fence.py", line 12, in <module>
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+ModuleNotFoundError: No module named 'st_aggrid'
+2025-08-27 23:44:35.069 Uncaught app exception
+Traceback (most recent call last):
+  File "C:\double-oak-starter\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 75, in exec_func_with_error_handling
+    result = func()
+  File "C:\double-oak-starter\.venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 574, in code_to_exec
+    exec(code, module.__dict__)
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\double-oak-starter\pages\01_Silt_Fence.py", line 12, in <module>
+    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+ModuleNotFoundError: No module named 'st_aggrid'
+^C

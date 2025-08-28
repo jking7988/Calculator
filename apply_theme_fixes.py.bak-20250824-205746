@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+apply_theme_fixes.py
+
+Batch-applies dark/light theme fixes and small UI corrections across Streamlit
+pages in this project. Creates timestamped backups next to each modified file.
+
+What it does:
+1) Make sidebar_card backgrounds dark/light-aware (replace hardcoded white).
+2) Fix profit badge clamp bug (0.0 upper bound -> 1.0).
+3) Remove immediate duplicate calls to inject_excel_styles(...).
+4) Improve light-mode gridlines/contrast in inject_excel_styles().
+
+Usage:
+  python apply_theme_fixes.py /path/to/your/app
+
+Notes:
+- Dry-run by default (no writes). Add --write to save changes.
+- Only touches *.py files under /pages and top-level files that import Streamlit.
+"""
+
+import argparse, re, sys, shutil, time
+from pathlib import Path
+
+CARD_BG_PATTERN = re.compile(
+    r'(with\s+sidebar_card\([^)]*?\bbg\s*=\s*)(["\']#fff(?:fff)?["\'])',
+    flags=re.DOTALL | re.IGNORECASE
+)
+
+CARD_BG_SIMPLE_WHITE = re.compile(
+    r'(\bbg\s*=\s*)(["\']#fff(?:fff)?["\'])',
+    flags=re.IGNORECASE
+)
+
+PROFIT_CLAMP_BAD = re.compile(
+    r'above_ratio\s*=\s*max\(\s*0\.0\s*,\s*min\(\s*\(m\s*-\s*target\)\s*/\s*0\.30\s*,\s*0\.0\s*\)\s*\)'
+)
+
+DUP_STYLES = re.compile(
+    r'(inject_excel_styles\(\s*ui_dark\s*\)\s*\n\s*){2,}',
+    flags=re.IGNORECASE
+)
+
+# In inject_excel_styles: tweak grid/label/value/alt_row for light mode
+GRID_LIGHT = re.compile(r'grid\s*=\s*"#ffffff"\s+if\s+dark\s+else\s+"#ffffff"')
+GRID_LIGHT_ALT = re.compile(r'grid\s*=\s*"#ffffff"\s+if\s+dark\s+else\s+"#\w{6}"')
+LABEL_LIGHT = re.compile(r'label_col\s*=\s*"#ceead1"\s+if\s+dark\s+else\s+"#ffffff"')
+VALUE_LIGHT = re.compile(r'value_col\s*=\s*"#ceead1"\s+if\s+dark\s+else\s+"#ffffff"')
+ALTROW_LIGHT = re.compile(r'alt_row\s*=\s*"#555755"\s+if\s+dark\s+else\s+"#a3a4a2"')
+
+# Also accept the variant values already improved in some files, but don't overwrite if already good
+def improve_inject_styles(text: str) -> str:
+    orig = text
+    text = GRID_LIGHT.sub('grid = "#ffffff" if dark else "#dbead9"', text)
+    text = GRID_LIGHT_ALT.sub('grid = "#ffffff" if dark else "#dbead9"', text)
+    text = LABEL_LIGHT.sub('label_col = "#ceead1" if dark else "#0f1b12"', text)
+    text = VALUE_LIGHT.sub('value_col = "#ceead1" if dark else "#0f1b12"', text)
+    text = ALTROW_LIGHT.sub('alt_row = "#1f2b20" if dark else "#f2f7f2"', text)
+    return text
+
+def make_card_bg_dynamic(text: str) -> str:
+    # Replace bg="#fff"/"#ffffff" inside sidebar_card(...) blocks with conditional
+    def repl(match):
+        before = match.group(1)
+        return before + '("#0f1b12" if ui_dark else "#ffffff")'
+    text = CARD_BG_PATTERN.sub(repl, text)
+
+    # Also handle simpler kwarg occurrences
+    text = CARD_BG_SIMPLE_WHITE.sub(r'\1("#0f1b12" if ui_dark else "#ffffff")', text)
+    return text
+
+def fix_profit_clamp(text: str) -> str:
+    return PROFIT_CLAMP_BAD.sub('above_ratio = max(0.0, min((m - target) / 0.30, 1.0))', text)
+
+def dedup_styles(text: str) -> str:
+    # Replace multiple consecutive inject calls with a single one
+    return DUP_STYLES.sub('inject_excel_styles(ui_dark)\n', text)
+
+def process_text(text: str) -> tuple[str, dict]:
+    changes = {}
+    new = text
+
+    newer = make_card_bg_dynamic(new)
+    if newer != new:
+        changes['card_bg'] = True
+        new = newer
+
+    newer = fix_profit_clamp(new)
+    if newer != new:
+        changes['profit_clamp'] = True
+        new = newer
+
+    newer = dedup_styles(new)
+    if newer != new:
+        changes['dedup_styles'] = True
+        new = newer
+
+    newer = improve_inject_styles(new)
+    if newer != new:
+        changes['inject_styles'] = True
+        new = newer
+
+    return new, changes
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('root', type=Path, help='Project root (folder containing pages/)')
+    ap.add_argument('--write', action='store_true', help='Apply changes (else dry-run)')
+    args = ap.parse_args()
+
+    root = args.root.resolve()
+    pages = (root / 'pages')
+    candidates = []
+    if pages.is_dir():
+        candidates.extend(pages.rglob('*.py'))
+    candidates.extend([p for p in root.glob('*.py')])
+
+    touched = 0
+    for fp in sorted(set(candidates)):
+        try:
+            text = fp.read_text(encoding='utf-8')
+        except Exception:
+            continue
+        new, changes = process_text(text)
+        if not changes:
+            continue
+
+        print(f'== {fp} ==')
+        for k in sorted(changes):
+            print(f'  - {k}')
+        touched += 1
+
+        if args.write:
+            ts = time.strftime('%Y%m%d-%H%M%S')
+            bak = fp.with_suffix(fp.suffix + f'.bak-{ts}')
+            shutil.copy2(fp, bak)
+            fp.write_text(new, encoding='utf-8')
+
+    if touched == 0:
+        print('No changes needed.')
+    else:
+        print(f'Files with changes: {touched}')
+        if not args.write:
+            print('Dry run complete. Re-run with --write to apply.')
+
+if __name__ == '__main__':
+    main()
