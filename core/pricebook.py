@@ -6,7 +6,7 @@ import streamlit as st
 
 # Optional bundled fallback inside your repo:
 DEFAULT_BUNDLED_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "pricebook.xlsx")
-DEFAULT_SHEET_NAME = None  # set to "Sheet1" if you want to force a sheet
+DEFAULT_SHEET_NAME = 13  # set to "Sheet1" if you want to force a sheet
 
 # =========================
 # Cached readers

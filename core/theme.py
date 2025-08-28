@@ -71,22 +71,22 @@ def fix_select_colors(dark: bool) -> None:
     """Force readable colors for selects, their menus, and text/number/textarea inputs."""
     if dark:
         # dark palette (kept close to your choices)
-        ctrl_bg       = "#020603"   # input/select background
-        ctrl_text     = "#89cd8f"   # input/select text & icons
+        ctrl_bg       = "#204b23"   # input/select background
+        ctrl_text     =  "#8acdcb"   # input/select text & icons
         border        = "#49ac51"
-        menu_bg       = "#020603"   # dropdown panel background
+        menu_bg       = "#49ac51"   # dropdown panel background
         menu_text     = "#ffffff"   # readable on dark
-        hover_bg      = "#0c1a10"
-        selected_bg   = "#112813"
+        hover_bg      = "#ffffff"
+        selected_bg   = "#3d8f44"
         selected_text = "#89cd8f"
         focus_ring    = "#ceead1"   # ring/glow color
         focus_border  = "#4bb254"   # border on focus
     else:
         # light palette
         ctrl_bg       = "#67bf6e"
-        ctrl_text     = "#071108"
+        ctrl_text     = "#ffffff"
         border        = "#020603"
-        menu_bg       = "#020603"
+        menu_bg       = "#ffffff"
         menu_text     = "#ffffff"
         hover_bg      = "#112813"
         selected_bg   = "#112813"

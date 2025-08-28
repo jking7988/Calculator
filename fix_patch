@@ -1,0 +1,8 @@
+import re, pathlib
+
+p = pathlib.Path("pages/01_Silt_Fence.py")
+t = p.read_text(encoding="utf-8")
+t2 = re.sub(r"data_return_mode\s*=\s*GridUpdateMode\.AS_INPUT",
+            'data_return_mode=_enum_or_str(DataReturnMode, "AS_INPUT")', t)
+p.write_text(t2, encoding="utf-8")
+print("Patched data_return_mode in", p)
