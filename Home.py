@@ -5,7 +5,9 @@ from streamlit.components.v1 import html as st_html  # keep if you embed custom 
 from core.theme_persist import init_theme, render_toggle, sidebar_skin, nav_colors
 from core.theme import apply_theme, fix_select_colors
 from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
-from utils.pricing import current_pricing, format_version
+from utils import pricing
+# or directly
+from utils.pricing import load_pricing_table, get_item
 
 with st.sidebar:
     st.subheader("📂 Pricebook")
