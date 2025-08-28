@@ -11,7 +11,7 @@ import matplotlib.colors as mcolors
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 from datetime import datetime
-
+import matplotlib.pyplot as plt
 from core.theme_persist import init_theme, render_toggle, sidebar_skin
 from core.theme import apply_theme, fix_select_colors
 from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
@@ -1000,3 +1000,4 @@ def _inject_two_col_panel_styles(panel_title: str, col1=None, col2=None, table_l
         f'</style>'
     )
     st.markdown(css, unsafe_allow_html=True)
+
