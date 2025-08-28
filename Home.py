@@ -5,13 +5,39 @@ from streamlit.components.v1 import html as st_html  # keep if you embed custom 
 from core.theme_persist import init_theme, render_toggle, sidebar_skin, nav_colors
 from core.theme import apply_theme, fix_select_colors
 from core.ui_sidebar import apply_sidebar_shell, sidebar_card, SIDEBAR_CFG
+from utils.pricing import current_pricing, format_version
 
-# ===== Page config (call once, first) =======================================
-st.set_page_config(
-    page_title="Double Oak – Home",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
+with st.sidebar:
+    st.subheader("📂 Pricebook")
+    f = st.file_uploader("Drop your pricing Excel (.xlsx)", type=["xlsx"], key="pricebook_uploader")
+    if f is not None:
+        st.session_state["pricebook_name"] = f.name
+        st.session_state["pricebook_bytes"] = f.getvalue()
+        st.success(f"Loaded: {f.name}")
+        st.cache_data.clear()  # invalidate any cached reads
+
+st.title("Double Oak Estimator")
+
+# Version banner + manual refresh
+col1, col2 = st.columns([1, 0.2])
+with col1:
+    try:
+        _, meta = current_pricing()
+        st.info(format_version(meta))
+    except Exception:
+        pass
+with col2:
+    if st.button("Refresh prices", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# Optional dev preview
+with st.expander("🔎 Pricing preview (first 20 rows)"):
+    try:
+        df, _ = current_pricing()
+        st.dataframe(df.head(20), use_container_width=True)
+    except Exception as e:
+        st.error(str(e))
 
 # Hide Streamlit chrome (header/menu/footer) and pull content up a bit
 st.markdown("""

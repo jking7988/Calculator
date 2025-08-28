@@ -1,0 +1,107 @@
+# core/pricebook.py
+from __future__ import annotations
+
+import io
+import os
+import pandas as pd
+import streamlit as st
+
+# Optional: name your bundled default
+DEFAULT_BUNDLED_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "pricebook.xlsx")
+DEFAULT_SHEET_NAME = None  # or "Sheet1" if you want to force a sheet
+
+# --------- internal cached reader ----------
+@st.cache_data(show_spinner=False)
+def _read_pricebook_from_bytes(b: bytes, sheet: str | None):
+    return pd.read_excel(io.BytesIO(b), sheet_name=sheet, engine="openpyxl")
+
+@st.cache_data(show_spinner=False)
+def _read_pricebook_from_path(path: str, sheet: str | None):
+    return pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
+
+# --------- public API ----------
+_pricebook_df: pd.DataFrame | None = None
+
+def _load_from_session_bytes(sheet: str | None) -> pd.DataFrame | None:
+    b = st.session_state.get("pricebook_bytes")
+    if b:
+        return _read_pricebook_from_bytes(b, sheet)
+    return None
+
+def _load_from_bundled(sheet: str | None) -> pd.DataFrame | None:
+    try:
+        if os.path.isfile(DEFAULT_BUNDLED_PATH):
+            return _read_pricebook_from_path(DEFAULT_BUNDLED_PATH, sheet)
+    except Exception:
+        pass
+    return None
+
+def _load_from_s3(sheet: str | None) -> pd.DataFrame | None:
+    # (Optional) If you decide to re-enable S3:
+    # import boto3, io
+    # s3 = boto3.client("s3",
+    #     region_name=st.secrets["AWS_REGION"],
+    #     aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+    #     aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+    # )
+    # obj = s3.get_object(Bucket=st.secrets["S3_BUCKET"], Key=st.secrets["S3_KEY"])
+    # return pd.read_excel(io.BytesIO(obj["Body"].read()), sheet_name=sheet, engine="openpyxl")
+    return None
+
+def ensure_loaded(force: bool = False, sheet: str | None = DEFAULT_SHEET_NAME):
+    """Loads the pricebook from (1) uploaded file, (2) bundled default, (3) S3 (disabled here)."""
+    global _pricebook_df
+    if (not force) and (_pricebook_df is not None):
+        return
+
+    # 1) session upload
+    df = _load_from_session_bytes(sheet)
+    if df is None:
+        # 2) bundled default
+        df = _load_from_bundled(sheet)
+    if df is None:
+        # 3) s3 (currently disabled)
+        df = _load_from_s3(sheet)
+
+    if df is None:
+        raise FileNotFoundError(
+            "No pricebook available. Please upload a pricing Excel in the sidebar, "
+            "or add a bundled default at 'assets/pricebook.xlsx'."
+        )
+
+    # Normalize common 4-column layout: code, name, unit, price
+    df = _normalize(df)
+    _pricebook_df = df
+
+def get_table() -> pd.DataFrame:
+    if _pricebook_df is None:
+        ensure_loaded()
+    return _pricebook_df
+
+def get_item(code: str) -> dict | None:
+    df = get_table()
+    if code in df.index:
+        return df.loc[code].to_dict()
+    return None
+
+def get_price(code: str, default: float | None = None) -> float | None:
+    item = get_item(code)
+    if item is None:
+        return default
+    return float(item["price"])
+
+# --------- helpers: normalize/clean ----------
+_UNIT_CANON = {
+    "EA": "EA", "EACH": "EA", "UNIT": "EA",
+    "LF": "LF", "L.F.": "LF", "LINEAR FT": "LF", "LINEAR FEET": "LF", "FT": "LF",
+    "SY": "SY", "SQ YD": "SY", "SQUARE YARD": "SY",
+    "SF": "SF", "SQ FT": "SF", "SQUARE FOOT": "SF",
+}
+
+def _money_to_float(x) -> float:
+    import re, math
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return float("nan")
+    s = str(x).strip()
+    if s == "":
+        return float("nan")

@@ -17,11 +17,102 @@ from core import pricing as p
 from core import settings as cfg
 from core import pricebook
 
+pricebook.ensure_loaded()  # now uses uploaded file or bundled fallback
+
+sf = pricebook.get_item("silt-fence-12g5")
+if sf:
+    st.write(f"12.5 Gauge Silt Fence ({sf['unit']}) — ${float(sf['price']):,.2f}")
+else:
+    st.warning("silt-fence-12g5 not found in the pricebook.")
+
+sf_price = pricebook.get_price("silt-fence-12g5", 0.0) or 0.0
+unit = pricebook.get_table().loc["silt-fence-12g5"]["unit"] if "silt-fence-12g5" in pricebook.get_table().index else "LF"
+
+st.write(f"12.5 Gauge Silt Fence ({unit}) — ${sf_price:,.2f}")
+
+if uploaded:
+    try:
+        pricing = load_pricing_table(uploaded)
+
+        st.success("✅ Pricing file loaded")
+        with st.expander("Preview first rows"):
+            st.dataframe(pricing.head(20))
+
+        # Example lookups
+        sf = get_item(pricing, "silt-fence-12g5")
+        tpost = get_item(pricing, "t-post-6ft")
+
+        if sf:
+            st.write(f"12.5 Gauge Silt Fence — {sf['unit']} — ${float(sf['price']):,.2f}")
+        if tpost:
+            st.write(f"T-Post 6' — {tpost['unit']} — ${float(tpost['price']):,.2f}")
+
+        qty = st.number_input("Quantity (LF)", min_value=0.0, step=1.0, value=100.0)
+        if sf:
+            st.metric("Line total", f"${qty * float(sf['price']):,.2f}")
+
+    except Exception as e:
+        st.error(f"Problem reading file: {e}")
+else:
+    st.info("👆 Drop your Excel file above to load prices.")
+
+# banner (optional)
+try:
+    _, meta = current_pricing()
+    st.caption(format_version(meta))
+except Exception:
+    pass
+
+# Example: lookups for your actual codes
+sf_12g5_price = get_price("silt-fence-12g5") or 0.0
+sf_unrein_price = get_price("silt-fence-unreinforced") or 0.0
+tpost_price = get_price("t-post-6ft") or 0.0
+wood_stake_price = get_price("wood-stake") or 0.0
+
+st.write(f"12.5 Gauge Silt Fence ({get_unit('silt-fence-12g5')}) — ${sf_12g5_price:,.2f}")
+st.write(f"Un-Reinforced Silt Fence ({get_unit('silt-fence-unreinforced')}) — ${sf_unrein_price:,.2f}")
+
+qty = st.number_input("Quantity (LF for fence; EA for posts/stakes)", min_value=0.0, step=1.0, value=100.0)
+
+# Example line total for 12.5g fence fabric only:
+st.metric("Fabric Line Total", f"${qty * sf_12g5_price:,.2f}")
+
+# If you have an assembly: e.g., fabric + 1 stake every 8 LF + 1 T-post every 50 LF:
+stakes_per_lf = 1/8
+tposts_per_lf = 1/50
+assembly_total = (sf_12g5_price) \
+               + (stakes_per_lf * wood_stake_price) \
+               + (tposts_per_lf * tpost_price)
+
+st.metric("Per-LF Assembly Cost (example)", f"${assembly_total:,.2f}")
+st.metric("Assembly Total (example)", f"${assembly_total * qty:,.2f}")
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
     HAS_AGGRID = True
 except ImportError:
     HAS_AGGRID = False
+
+from utils.pricing import load_pricing_table, get_price, get_unit, get_item
+
+st.caption("Prices are loaded from S3 and auto-refresh when the file is updated.")
+
+# Show first few lines during development
+with st.expander("📄 Pricing preview (dev)"):
+    st.dataframe(load_pricing_table().head(20), use_container_width=True)
+
+# Example lookups with your actual codes from the sheet:
+sf_12g5_price = get_price("silt-fence-12g5")
+sf_unrein_price = get_price("silt-fence-unreinforced")
+tpost_price = get_price("t-post-6ft")
+
+st.write(f"12.5 Gauge Silt Fence (per {get_unit('silt-fence-12g5')}): ${sf_12g5_price}")
+st.write(f"Un-Reinforced Silt Fence (per {get_unit('silt-fence-unreinforced')}): ${sf_unrein_price}")
+st.write(f"T-Post 6' (per {get_unit('t-post-6ft')}): ${tpost_price}")
+
+# Compute a line total (qty is in the same unit as the item’s unit)
+qty = st.number_input("Quantity (matches item unit)", min_value=0.0, step=1.0, value=100.0)
+line_total = qty * (sf_12g5_price or 0.0)
+st.metric("Line total", f"${line_total:,.2f}")
 
 # -------------------- Page + Global CSS --------------------
 st.set_page_config(
