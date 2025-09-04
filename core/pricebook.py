@@ -3,25 +3,62 @@ from __future__ import annotations
 import io, os, re
 import pandas as pd
 import streamlit as st
+from typing import Optional
+
+# -------------------------
+# Locations & defaults
+# -------------------------
+# Project root (parent of 'core')
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+
+# Candidate filenames in the REPO ROOT (no upload required)
+ROOT_CANDIDATES = (
+    "pricebook.xlsx",
+    "pricing.xlsx",
+    "pricebook.csv",
+)
 
 # Optional bundled fallback inside your repo:
-DEFAULT_BUNDLED_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "pricebook.xlsx")
-DEFAULT_SHEET_NAME = 13  # set to "Sheet1" if you want to force a sheet
+DEFAULT_BUNDLED_PATH = os.path.join(PROJECT_ROOT, "assets", "pricebook.xlsx")
+DEFAULT_SHEET_NAME: Optional[str | int] = 13  # or None / "Sheet1" if you prefer
 
-# =========================
+# -------------------------
 # Cached readers
-# =========================
+# -------------------------
 @st.cache_data(show_spinner=False)
-def _read_from_bytes(b: bytes, sheet: str | None):
-    return pd.read_excel(io.BytesIO(b), sheet_name=sheet, engine="openpyxl")
+def _read_from_bytes(b: bytes, sheet: str | int | None):
+    # Try Excel first
+    try:
+        return pd.read_excel(io.BytesIO(b), sheet_name=sheet, engine="openpyxl")
+    except Exception:
+        # Fallback to CSV if it isn't an Excel file
+        return pd.read_csv(io.BytesIO(b))
 
 @st.cache_data(show_spinner=False)
-def _read_from_path(path: str, sheet: str | None):
+def _read_excel_path(path: str, sheet: str | int | None):
     return pd.read_excel(path, sheet_name=sheet, engine="openpyxl")
 
-# =========================
+@st.cache_data(show_spinner=False)
+def _read_csv_path(path: str):
+    # Allow common CSV variations
+    return pd.read_csv(path)
+
+def _read_any_path(path: str, sheet: str | int | None):
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xlsm", ".xls"):
+        return _read_excel_path(path, sheet)
+    elif ext == ".csv":
+        return _read_csv_path(path)
+    else:
+        # Try Excel then CSV as a last resort
+        try:
+            return _read_excel_path(path, sheet)
+        except Exception:
+            return _read_csv_path(path)
+
+# -------------------------
 # Normalization / Validation
-# =========================
+# -------------------------
 _UNIT_CANON = {
     "EA":"EA","EACH":"EA","UNIT":"EA",
     "LF":"LF","L.F.":"LF","LINEAR FT":"LF","LINEAR FEET":"LF","FT":"LF",
@@ -81,31 +118,67 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 
     return out.set_index("code")
 
-# =========================
+# -------------------------
 # Public API
-# =========================
+# -------------------------
 _pricebook_df: pd.DataFrame | None = None
 
-def ensure_loaded(force: bool = False, sheet: str | None = DEFAULT_SHEET_NAME):
-    """Load pricebook from (1) uploaded bytes or (2) bundled fallback."""
+def _find_repo_root_file() -> Optional[str]:
+    """Return the first existing candidate path in repo root (or None)."""
+    for name in ROOT_CANDIDATES:
+        p = os.path.join(PROJECT_ROOT, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+def ensure_loaded(force: bool = False, sheet: str | int | None = DEFAULT_SHEET_NAME):
+    """
+    Load pricebook using this precedence:
+      1) PRICEBOOK_PATH (env) -> absolute/relative path
+      2) repo-root candidate file (pricebook.xlsx/pricing.xlsx/pricebook.csv)
+      3) uploaded bytes from session (pricebook_bytes)
+      4) bundled fallback at assets/pricebook.xlsx
+    """
     global _pricebook_df
     if (not force) and (_pricebook_df is not None):
         return
 
-    # 1) uploaded file from sidebar (set by Home.py)
+    # 1) Env override
+    env_path = os.environ.get("PRICEBOOK_PATH")
+    if env_path:
+        path = env_path if os.path.isabs(env_path) else os.path.join(PROJECT_ROOT, env_path)
+        if os.path.isfile(path):
+            df = _read_any_path(path, sheet)
+            _pricebook_df = _normalize(df)
+            return
+        else:
+            st.warning(f"PRICEBOOK_PATH points to a missing file: {path}")
+
+    # 2) Repo-root file
+    root_path = _find_repo_root_file()
+    if root_path:
+        df = _read_any_path(root_path, sheet)
+        _pricebook_df = _normalize(df)
+        return
+
+    # 3) Uploaded file bytes (legacy path)
     b = st.session_state.get("pricebook_bytes")
     if b:
         df = _read_from_bytes(b, sheet)
-    # 2) bundled fallback
-    elif os.path.isfile(DEFAULT_BUNDLED_PATH):
-        df = _read_from_path(DEFAULT_BUNDLED_PATH, sheet)
-    else:
-        raise FileNotFoundError(
-            "No pricebook found. Upload a pricing Excel in the sidebar, "
-            "or add a bundled default at assets/pricebook.xlsx"
-        )
+        _pricebook_df = _normalize(df)
+        return
 
-    _pricebook_df = _normalize(df)
+    # 4) Bundled fallback
+    if os.path.isfile(DEFAULT_BUNDLED_PATH):
+        df = _read_any_path(DEFAULT_BUNDLED_PATH, sheet)
+        _pricebook_df = _normalize(df)
+        return
+
+    raise FileNotFoundError(
+        "No pricebook found. Add a pricing file at the repo root "
+        "(pricebook.xlsx / pricing.xlsx / pricebook.csv), "
+        "set PRICEBOOK_PATH, upload a file, or provide assets/pricebook.xlsx."
+    )
 
 def get_table() -> pd.DataFrame:
     if _pricebook_df is None:
@@ -119,4 +192,3 @@ def get_item(code: str) -> dict | None:
 def get_price(code: str, default: float | None = None) -> float | None:
     item = get_item(code)
     return float(item["price"]) if item and pd.notna(item["price"]) else default
-

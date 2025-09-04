@@ -14,8 +14,8 @@ THEMES = {
         "card_border":    "3px solid #2e6d33",
     },
     "dark": {
-        "page_bg":        "#1d4520",
-        "text":           "#020603",
+        "page_bg":        "#666765",
+        "text":           "#ffffff",
         "muted_text":     "#9ca3af",
         "accent":         "#5bd66f",
         "sidebar_bg":     "#102318",
